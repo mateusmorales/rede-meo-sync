@@ -99,7 +99,7 @@ for cod in sorted(CNPJS):
               "data_documento":dt(g("data_documento")),"data_lancamento":dt(g("data_lancamento")),
               "hora_lancamento":hora(g("hora_lancamento")),
               "cod_vendedor":inteiro(g("cod_vendedor")),"codigo_cliente":inteiro(g("codigo_cliente")),
-              "cod_produto":inteiro(g("cod_produto")),"id_setor":None,"id_linha":None,
+              "cod_produto":inteiro(g("cod_produto")),
               "quantidade":num(g("quantidade")) or 0,"valor_total":num(g("valor_total")) or 0,
               "valor_liquido":num(g("valor_liquido")),"preco_unitario":num(g("preco_unitario")),
               "preco_tabela_epoca":num(g("preco_tabela_epoca")),"desconto":num(g("desconto")) or 0,
