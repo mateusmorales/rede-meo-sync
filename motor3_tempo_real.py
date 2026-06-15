@@ -25,6 +25,10 @@ def inteiro(s):
     try: return int(float(s)) if s not in (None,"") else None
     except: return None
 def dt(s): return s[:10] if s else None
+def hora(s):
+    if not s: return None
+    s = s.strip()
+    return s if s else None
 
 def get_lojas():
     url=f"{SUPA_URL}/rest/v1/lojas?select=id,cod_microvix&cod_microvix=not.is.null"
@@ -93,6 +97,7 @@ for cod in sorted(CNPJS):
               "chave_nf":g("chave_nf") or None,"serie":g("serie") or None,"modelo_nf":g("modelo_nf") or None,
               "cnpj_emp":g("cnpj_emp") or None,"empresa":cod,"loja_id":loja_id,
               "data_documento":dt(g("data_documento")),"data_lancamento":dt(g("data_lancamento")),
+              "hora_lancamento":hora(g("hora_lancamento")),
               "cod_vendedor":inteiro(g("cod_vendedor")),"codigo_cliente":inteiro(g("codigo_cliente")),
               "cod_produto":inteiro(g("cod_produto")),"id_setor":None,"id_linha":None,
               "quantidade":num(g("quantidade")) or 0,"valor_total":num(g("valor_total")) or 0,
