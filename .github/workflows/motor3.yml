@@ -1,0 +1,22 @@
+name: Motor 3 - Tempo real
+
+on:
+  schedule:
+    - cron: '*/10 11-23 * * *'
+    - cron: '*/10 0-2 * * *'
+  workflow_dispatch:
+
+jobs:
+  tempo_real:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar Motor 3
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+        run: python motor3_tempo_real.py
