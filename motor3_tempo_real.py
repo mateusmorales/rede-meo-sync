@@ -1,12 +1,13 @@
 import urllib.request, urllib.error, json, xml.etree.ElementTree as ET, time, os
-from datetime import date
+from datetime import datetime, timezone, timedelta
 
 SUPA_URL = "https://cqvdhzxwmgdfnpypelcy.supabase.co"
 SUPA_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 CHAVE = os.environ["LINX_CHAVE"]
 LINX = "https://webapi.microvix.com.br/1.0/api/integracao"
 
-HOJE = date.today().isoformat()
+BR = timezone(timedelta(hours=-3))
+HOJE = datetime.now(BR).date().isoformat()
 
 CNPJS = {1:"19942423000159",2:"21135935000155",3:"21267421000153",5:"09098956000142",
 7:"16634813000173",8:"05849808000161",9:"30295460000155",10:"35440782000164",
