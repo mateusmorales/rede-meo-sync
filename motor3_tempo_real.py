@@ -132,3 +132,16 @@ while True:
 
 print("="*48)
 print(f"MOTOR 3: {gi} itens hoje | R$ {gt:,.2f} | {catn} categorizados | {time.time()-t0:.0f}s")
+
+# Carimba a última execução em sync_status — prova que o motor rodou, mesmo em
+# horário parado (sem venda nova). Secundário: se falhar, só loga e não derruba.
+try:
+    agora=datetime.now(timezone.utc).isoformat()
+    url=f"{SUPA_URL}/rest/v1/sync_status?motor=eq.motor3"
+    headers={"apikey":SUPA_KEY,"Authorization":f"Bearer {SUPA_KEY}","Content-Type":"application/json","Prefer":"return=minimal"}
+    body=json.dumps({"ultima_execucao":agora,"atualizado_em":agora}).encode("utf-8")
+    req=urllib.request.Request(url,data=body,headers=headers,method="PATCH")
+    with urllib.request.urlopen(req,timeout=60): pass
+    print(f"sync_status carimbado: {agora}")
+except Exception as e:
+    print(f"AVISO: falha ao carimbar sync_status: {e}")
