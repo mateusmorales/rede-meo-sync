@@ -133,6 +133,30 @@ while True:
 print("="*48)
 print(f"MOTOR 3: {gi} itens hoje | R$ {gt:,.2f} | {catn} categorizados | {time.time()-t0:.0f}s")
 
+# Encadeia o refresh dos rollups logo após a categorização, pra reduzir a
+# defasagem entre a Home (ao vivo, vendas_itens) e as abas (rollup). Mesma janela
+# do cron rollup_refresh_10min (ontem+hoje BRT). As funções refresh_rollup e
+# refresh_rollup_lentes têm advisory lock no banco, então rodar junto do cron é
+# seguro. Best-effort: erro/timeout aqui SÓ loga e NÃO derruba o motor (o cron
+# noturno é a rede de segurança). Precisa vir DEPOIS da categorização e ANTES do
+# carimbo de sync_status (pra o "Atualizado às HH:MM" refletir Home+abas prontas).
+def dispara_refresh(nome, corpo):
+    url=f"{SUPA_URL}/rest/v1/rpc/{nome}"
+    headers={"apikey":SUPA_KEY,"Authorization":f"Bearer {SUPA_KEY}","Content-Type":"application/json"}
+    req=urllib.request.Request(url,data=json.dumps(corpo).encode("utf-8"),headers=headers,method="POST")
+    with urllib.request.urlopen(req,timeout=300): pass
+
+ONTEM=(datetime.now(BR).date()-timedelta(days=1)).isoformat()
+janela={"p_data_ini":ONTEM,"p_data_fim":HOJE}
+tr=time.time()
+for nome in ("refresh_rollup","refresh_rollup_lentes"):
+    try:
+        dispara_refresh(nome, janela)
+        print(f"  {nome} OK")
+    except Exception as e:
+        print(f"  AVISO: {nome} falhou (best-effort, cron cobre): {e}")
+print(f"refresh rollup disparado (ontem={ONTEM} hoje={HOJE}) em {time.time()-tr:.0f}s")
+
 # Carimba a última execução em sync_status — prova que o motor rodou, mesmo em
 # horário parado (sem venda nova). Secundário: se falhar, só loga e não derruba.
 try:
