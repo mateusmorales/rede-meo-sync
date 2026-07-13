@@ -178,4 +178,29 @@ while True:
     n=chama(); tot+=n
     if n==0: break
 print(f"  OK {tot} itens categorizados.")
+
+# [refresh] Encadeia o refresh dos rollups no fim do Motor 2, com o MESMO range de
+# 7 dias que ele reconciliou (VEND_DI..VEND_DF) — assim correcoes de vendas atrasadas
+# do Linx aparecem no app sem esperar o refresh noturno. Mesmo padrao do Motor 3.
+# As RPCs sao SECURITY DEFINER e tem advisory lock 918273001 por dentro, entao rodar
+# junto do Motor 3 e seguro (sem lock manual aqui). Best-effort: erro so loga e NAO
+# derruba o motor (o dado bruto ja foi reconciliado; o refresh e a cereja, o cron
+# noturno cobre se falhar). Idempotente nas 3 execucoes diarias (3:30, 14h, 20h).
+print("\n[refresh] Atualizando rollup (mesma janela de 7 dias)...")
+def dispara_refresh(nome, corpo):
+    url=f"{SUPA_URL}/rest/v1/rpc/{nome}"
+    headers={"apikey":SUPA_KEY,"Authorization":f"Bearer {SUPA_KEY}","Content-Type":"application/json"}
+    req=urllib.request.Request(url,data=json.dumps(corpo).encode("utf-8"),headers=headers,method="POST")
+    with urllib.request.urlopen(req,timeout=300): pass
+
+janela={"p_data_ini":VEND_DI,"p_data_fim":VEND_DF}
+tr=time.time()
+for nome in ("refresh_rollup","refresh_rollup_lentes"):
+    try:
+        dispara_refresh(nome, janela)
+        print(f"  {nome} OK")
+    except Exception as e:
+        print(f"  AVISO: {nome} falhou (best-effort, cron cobre): {e}")
+print(f"  refresh rollup disparado ({VEND_DI} a {VEND_DF}) em {time.time()-tr:.0f}s")
+
 print("\nMOTOR 2 concluido com sucesso.")
