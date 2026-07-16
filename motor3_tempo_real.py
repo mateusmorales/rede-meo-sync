@@ -149,7 +149,7 @@ def dispara_refresh(nome, corpo):
 ONTEM=(datetime.now(BR).date()-timedelta(days=1)).isoformat()
 janela={"p_data_ini":ONTEM,"p_data_fim":HOJE}
 tr=time.time()
-for nome in ("refresh_rollup","refresh_rollup_lentes"):
+for nome in ("refresh_rollup","refresh_rollup_lentes","refresh_rollup_vendedor"):
     try:
         dispara_refresh(nome, janela)
         print(f"  {nome} OK")

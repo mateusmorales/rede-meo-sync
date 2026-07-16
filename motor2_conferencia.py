@@ -195,7 +195,7 @@ def dispara_refresh(nome, corpo):
 
 janela={"p_data_ini":VEND_DI,"p_data_fim":VEND_DF}
 tr=time.time()
-for nome in ("refresh_rollup","refresh_rollup_lentes"):
+for nome in ("refresh_rollup","refresh_rollup_lentes","refresh_rollup_vendedor"):
     try:
         dispara_refresh(nome, janela)
         print(f"  {nome} OK")
