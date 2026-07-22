@@ -113,10 +113,25 @@ def limpa_nome(raw):
     return n.strip()
 
 
-def conta_meta_de(nome_raw):
-    """GERENTE ou 'VENDEDOR 1' no nome → conta_meta=False; senão True."""
+# "VENDEDOR 1" como PALAVRA (limite \b): não casa "VENDEDOR 10..19"/"VENDEDOR 1xx".
+_VEND1 = re.compile(r"\bVENDEDOR 1\b")
+
+
+def conta_meta_de(nome_raw, funcao):
+    """conta_meta=False p/ gerente/supervisor; senão True. Ordem:
+    1) funcao == 'GERENTE'                                   → False
+    2) 'GERENTE' ou 'SUPERVISOR' no nome                     → False
+    3) 'VENDEDOR 1' como palavra no nome (não 10-19)         → False
+    4) senão                                                 → True
+    """
+    if (funcao or "").strip().upper() == "GERENTE":
+        return False
     up = (nome_raw or "").upper()
-    return not ("GERENTE" in up or "VENDEDOR 1" in up)
+    if "GERENTE" in up or "SUPERVISOR" in up:
+        return False
+    if _VEND1.search(up):
+        return False
+    return True
 
 
 # ── API LinxVendedores (idêntico aos motores) ────────────────────────────────
@@ -137,7 +152,7 @@ VARIACOES = [
     ("+data_mov+timestamp", {"data_mov_ini": DATA_INI, "data_mov_fim": DATA_FIM, "timestamp": 0}),
 ]
 
-CAMPOS_ALVO = ["cod_vendedor", "nome_vendedor", "ativo", "data_admissao", "meta_peso"]
+CAMPOS_ALVO = ["cod_vendedor", "nome_vendedor", "ativo", "data_admissao", "funcao", "meta_peso"]
 
 
 def montar_body(metodo, params):
@@ -266,6 +281,7 @@ for cod_loja in sorted(CNPJS):
             "nome_raw": (r.get(mapa["nome_vendedor"]) or "") if mapa["nome_vendedor"] else "",
             "ativo_raw": (r.get(mapa["ativo"]) or "") if mapa["ativo"] else "",
             "adm_raw": (r.get(mapa["data_admissao"]) or "") if mapa["data_admissao"] else "",
+            "funcao_raw": (r.get(mapa["funcao"]) or "") if mapa["funcao"] else "",
         }
 
 total_pares = len(api)
@@ -301,7 +317,7 @@ for (loja, cod), a in api.items():
             "loja": loja, "cod": cod, "nome": nome,
             "ativo": api_ativo,
             "admissao": data_ou_none(a["adm_raw"]),
-            "conta_meta": conta_meta_de(a["nome_raw"]),
+            "conta_meta": conta_meta_de(a["nome_raw"], a["funcao_raw"]),
         })
         continue
     prev_ativo = prev["ativo"]                       # bool ou None
