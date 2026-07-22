@@ -3,9 +3,10 @@
 # =============================================================================
 # scripts/motor_vendedores.py  —  Motor de sincronização de vendedores.
 #
-# ⚠️ ESCRITA PARCIAL (esta versão): grava APENAS os NOVOS ATIVOS (par novo com
-#    ativo='S') via upsert on_conflict=(cod_microvix_loja,cod_vendedor). As demais
-#    fases — S→N, N→S, novos já-inativos, ausentes da API — seguem SÓ como log.
+# ⚠️ ESCRITA PARCIAL (esta versão): grava (1) NOVOS ATIVOS (par novo ativo='S')
+#    via upsert on_conflict=(cod_microvix_loja,cod_vendedor); e (2) S→N — PATCH
+#    ativo=false + data_saida=HOJE_BRT (só se estava NULL). As demais fases — N→S,
+#    novos já-inativos, ausentes da API — seguem SÓ como log.
 #
 # Fluxo (desenho aprovado):
 #   1. Lê LinxVendedores das 35 empresas (empresa que falha → registra e PULA).
@@ -287,9 +288,41 @@ def upsert_novos_ativos(registros):
     return enviados
 
 
+def patch_saida(linhas):
+    """ESCRITA da fase S→N: um PATCH por par (filtro cod_microvix_loja+cod_vendedor).
+    Sempre ativo=false + atualizado_em; data_saida=HOJE_BRT SÓ se ainda estava NULL
+    (nunca sobrescreve saída já preenchida). NÃO toca conta_meta/nome/usuario_id.
+    Idempotente: quem já é inativo deixou de ser S→N; e o carimbo só ocorre se NULL.
+    Devolve (ativados_off, carimbados)."""
+    ativados_off, carimbados = 0, 0
+    headers = {"apikey": SUPA_KEY, "Authorization": f"Bearer {SUPA_KEY}",
+               "Content-Type": "application/json", "Prefer": "return=minimal"}
+    for x in linhas:
+        body = {"ativo": False, "atualizado_em": AGORA_BRT}
+        if x["data_saida_seria"]:                       # só carimba se estava NULL
+            body["data_saida"] = HOJE_BRT.isoformat()
+        url = (f"{SUPA_URL}/rest/v1/vendas_vendedores"
+               f"?cod_microvix_loja=eq.{x['loja']}&cod_vendedor=eq.{x['cod']}")
+        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                     headers=headers, method="PATCH")
+        for tent in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=60):
+                    ativados_off += 1
+                    if x["data_saida_seria"]:
+                        carimbados += 1
+                    break
+            except urllib.error.HTTPError as e:
+                print(f"      ERRO {e.code} (loja {x['loja']} cod {x['cod']}): {e.read().decode()[:160]}")
+                if tent == 2:
+                    raise
+                time.sleep(5)
+    return ativados_off, carimbados
+
+
 # ── Execução (DRY-RUN) ───────────────────────────────────────────────────────
 print("=" * 74)
-print(f"MOTOR VENDEDORES — escrita: SÓ NOVOS ATIVOS (S→N/N→S em log) | {HOJE_BRT} BRT")
+print(f"MOTOR VENDEDORES — escrita: NOVOS ATIVOS + S→N (N→S em log) | {HOJE_BRT} BRT")
 print("=" * 74)
 print("  chaves lidas do env (não impressas)")
 
@@ -386,9 +419,9 @@ for (loja, cod), a in api.items():
 # pares no banco AUSENTES da API: intencionalmente NÃO tocados.
 ausentes_api = [k for k in db if k not in api]
 
-# 5) ESCRITA — SOMENTE novos_ativos. S→N / N→S / novos_inativos / ausentes: NÃO
-#    escrevem nesta fase (seguem como log). Roda só aqui, já passada a trava.
-print("\n[4] Escrevendo NOVOS ATIVOS (única fase com escrita)…")
+# 5) ESCRITA — novos_ativos (insert) + S→N (patch). N→S / novos_inativos /
+#    ausentes: NÃO escrevem (seguem como log). Só aqui, já passada a trava.
+print("\n[4] Escrevendo NOVOS ATIVOS (insert)…")
 rows_ins = [{
     "cod_microvix_loja": x["loja"],
     "cod_vendedor": int(x["cod"]),
@@ -406,12 +439,16 @@ rows_ins = [{
 inseridos = upsert_novos_ativos(rows_ins)
 print(f"    enviados ao banco (upsert on_conflict): {inseridos}")
 
+print("\n[5] Escrevendo S→N (ativo=false + carimbo de data_saida se NULL)…")
+sn_off, sn_carimbados = patch_saida(s_to_n)
+print(f"    ativo→false: {sn_off} | data_saida carimbada: {sn_carimbados}")
+
 # ── SAÍDA ────────────────────────────────────────────────────────────────────
 def _cod(x):  # ordenação numérica estável
     return (int(x["loja"]), int(x["cod"]) if str(x["cod"]).lstrip("-").isdigit() else 0)
 
 print("\n" + "=" * 74)
-print("RESULTADO (escrita só de NOVOS ATIVOS; S→N/N→S apenas logados)")
+print("RESULTADO (escrita: NOVOS ATIVOS + S→N; N→S apenas logado)")
 print("=" * 74)
 
 print(f"\n── NOVOS ATIVOS (ativo=S; INSERIDOS: {inseridos}) ──")
@@ -426,10 +463,11 @@ print(f"   {'loja':>4} {'cod':>6} {'ativo':>5}  nome")
 for x in sorted(novos_inativos, key=_cod):
     print(f"   ⚠️ {x['loja']:>4} {x['cod']:>6} {x['ativo_raw']:>5}  {x['nome'][:34]}")
 
-print(f"\n── S→N (ativo→inativo; carimbaria data_saida={HOJE_BRT}): {len(s_to_n)} ──")
-print(f"   {'loja':>4} {'cod':>6}  nome  (carimbo: 'sim' se data_saida ainda NULL)")
+print(f"\n── S→N (ativo→false: {sn_off}; data_saida carimbada: {sn_carimbados}) ──")
+print(f"   {'loja':>4} {'cod':>6} {'data_saida':>12}  nome")
 for x in sorted(s_to_n, key=_cod):
-    print(f"   {x['loja']:>4} {x['cod']:>6}  {x['nome'][:34]:<34} carimbaria={'sim' if x['data_saida_seria'] else 'não(já preenchida)'}")
+    ds = HOJE_BRT.isoformat() if x["data_saida_seria"] else "mantida"
+    print(f"   {x['loja']:>4} {x['cod']:>6} {ds:>12}  {x['nome'][:34]}")
 
 print(f"\n── N→S (inativo voltou ativo na API → REVISÃO, NÃO reativa): {len(n_to_s)} ──")
 print(f"   {'loja':>4} {'cod':>6}  nome")
@@ -446,9 +484,11 @@ print(f"  pares no banco:         {len(db)}")
 print(f"  NOVOS ATIVOS detectados:               {len(novos_ativos)}")
 print(f"  NOVOS ATIVOS INSERIDOS (escrita):      {inseridos}")
 print(f"  novos já-inativos (ignorados/logados): {len(novos_inativos)}")
-print(f"  S→N (só log nesta fase):    {len(s_to_n)}")
+print(f"  S→N detectados:             {len(s_to_n)}")
+print(f"  S→N ativo→false (escrita):  {sn_off}")
+print(f"  S→N data_saida carimbada:   {sn_carimbados}")
 print(f"  N→S (revisão, só log):      {len(n_to_s)}")
 print(f"  no banco, ausentes API: {len(ausentes_api)}  (NÃO tocados)")
-print("\n  ESCRITA: apenas NOVOS ATIVOS (upsert on_conflict, idempotente).")
-print("  NÃO escritos: S→N, N→S, novos já-inativos, ausentes da API (seguem em log).")
+print("\n  ESCRITA: NOVOS ATIVOS (upsert) + S→N (patch ativo=false / carimbo). Idempotente.")
+print("  NÃO escritos: N→S, novos já-inativos, ausentes da API (seguem em log).")
 print("Fim.")
