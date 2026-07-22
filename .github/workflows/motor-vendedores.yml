@@ -1,0 +1,30 @@
+# Motor Vendedores — sincroniza o cadastro de vendedores (LinxVendedores →
+# public.vendas_vendedores). ISOLADO do Motor 2 (conferência) e do Motor 3
+# (venda ao vivo): workflow, job e concurrency próprios — falha aqui NÃO afeta
+# a venda ao vivo. Agendado 1x/dia na madrugada BRT via cron-job.org (dispatch),
+# depois do Motor 2, pra não competir pela API do Linx.
+#
+# ⚠️ Estado atual: o script roda em DRY-RUN (só leitura + diff, sem escrita).
+name: Motor Vendedores - cadastro diario
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: motor-vendedores
+  cancel-in-progress: false
+
+jobs:
+  vendedores:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar Motor Vendedores (dry-run)
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+        run: python scripts/motor_vendedores.py
