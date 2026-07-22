@@ -3,8 +3,9 @@
 # =============================================================================
 # scripts/motor_vendedores.py  —  Motor de sincronização de vendedores.
 #
-# ⚠️ MODO DRY-RUN (esta versão): SÓ LEITURA + DIFF. NÃO faz NENHUM insert/update/
-#    upsert. Nenhuma escrita no banco. Só imprime o que FARIA.
+# ⚠️ ESCRITA PARCIAL (esta versão): grava APENAS os NOVOS ATIVOS (par novo com
+#    ativo='S') via upsert on_conflict=(cod_microvix_loja,cod_vendedor). As demais
+#    fases — S→N, N→S, novos já-inativos, ausentes da API — seguem SÓ como log.
 #
 # Fluxo (desenho aprovado):
 #   1. Lê LinxVendedores das 35 empresas (empresa que falha → registra e PULA).
@@ -29,6 +30,7 @@ import os
 import sys
 import json
 import re
+import time
 import urllib.request
 import urllib.error
 import calendar
@@ -52,6 +54,7 @@ PARES_MIN = 1000
 # Carimbo de data_saida usaria a data LOCAL BRT (não now() UTC). Aqui só exibimos.
 BRT = timezone(timedelta(hours=-3))
 HOJE_BRT = datetime.now(BRT).date()
+AGORA_BRT = datetime.now(BRT).isoformat()  # timestamptz p/ atualizado_em
 
 # Sentinelas de data a descartar (inclui os lixos 1900/1990/1991-01-01 da API).
 SENTINELAS = {"", "0", "null", "none", "0000-00-00", "1900-01-01", "1990-01-01", "1991-01-01"}
@@ -95,6 +98,15 @@ def ativo_bool(v):
     if s == "N":
         return False
     return None
+
+
+def meta_ou_none(v):
+    """meta_peso da API ('1,000000'/'0'/'') → float; inválido/vazio → 0.0."""
+    s = (v or "").strip().replace(",", ".")
+    try:
+        return float(s) if s else 0.0
+    except ValueError:
+        return 0.0
 
 
 _SO_MARCADOR = re.compile(r"(?i)(cbmo|gerente|vendedor|\d+|\s+|/)")
@@ -152,7 +164,7 @@ VARIACOES = [
     ("+data_mov+timestamp", {"data_mov_ini": DATA_INI, "data_mov_fim": DATA_FIM, "timestamp": 0}),
 ]
 
-CAMPOS_ALVO = ["cod_vendedor", "nome_vendedor", "ativo", "data_admissao", "funcao", "meta_peso"]
+CAMPOS_ALVO = ["cod_vendedor", "nome_vendedor", "ativo", "data_admissao", "cargo", "funcao", "meta_peso"]
 
 
 def montar_body(metodo, params):
@@ -247,9 +259,37 @@ def ler_estado():
     return out
 
 
+def upsert_novos_ativos(registros):
+    """ÚNICA fase que ESCREVE. INSERT via on_conflict=(cod_microvix_loja,
+    cod_vendedor) com merge-duplicates → idempotente (rodar 2x não duplica).
+    Devolve quantos foram enviados. Só é chamada DEPOIS da trava de segurança."""
+    if not registros:
+        return 0
+    url = f"{SUPA_URL}/rest/v1/vendas_vendedores?on_conflict=cod_microvix_loja,cod_vendedor"
+    headers = {"apikey": SUPA_KEY, "Authorization": f"Bearer {SUPA_KEY}",
+               "Content-Type": "application/json",
+               "Prefer": "resolution=merge-duplicates,return=minimal"}
+    enviados = 0
+    for i in range(0, len(registros), 500):
+        batch = registros[i:i + 500]
+        req = urllib.request.Request(url, data=json.dumps(batch).encode("utf-8"),
+                                     headers=headers, method="POST")
+        for tent in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=180):
+                    enviados += len(batch)
+                    break
+            except urllib.error.HTTPError as e:
+                print(f"      ERRO {e.code}: {e.read().decode()[:200]}")
+                if tent == 2:
+                    raise
+                time.sleep(5)
+    return enviados
+
+
 # ── Execução (DRY-RUN) ───────────────────────────────────────────────────────
 print("=" * 74)
-print(f"MOTOR VENDEDORES — DRY-RUN (sem escrita) | {HOJE_BRT} BRT")
+print(f"MOTOR VENDEDORES — escrita: SÓ NOVOS ATIVOS (S→N/N→S em log) | {HOJE_BRT} BRT")
 print("=" * 74)
 print("  chaves lidas do env (não impressas)")
 
@@ -281,7 +321,9 @@ for cod_loja in sorted(CNPJS):
             "nome_raw": (r.get(mapa["nome_vendedor"]) or "") if mapa["nome_vendedor"] else "",
             "ativo_raw": (r.get(mapa["ativo"]) or "") if mapa["ativo"] else "",
             "adm_raw": (r.get(mapa["data_admissao"]) or "") if mapa["data_admissao"] else "",
+            "cargo_raw": (r.get(mapa["cargo"]) or "") if mapa["cargo"] else "",
             "funcao_raw": (r.get(mapa["funcao"]) or "") if mapa["funcao"] else "",
+            "meta_raw": (r.get(mapa["meta_peso"]) or "") if mapa["meta_peso"] else "",
         }
 
 total_pares = len(api)
@@ -325,6 +367,9 @@ for (loja, cod), a in api.items():
                 "ativo": api_ativo,
                 "admissao": data_ou_none(a["adm_raw"]),
                 "conta_meta": conta_meta_de(a["nome_raw"], a["funcao_raw"]),
+                "cargo": (a["cargo_raw"] or "").strip(),
+                "funcao": (a["funcao_raw"] or "").strip(),
+                "meta_peso": meta_ou_none(a["meta_raw"]),
             })
         else:
             # Novo já inativo (entrou e saiu sem passar por ativo): não inserir.
@@ -341,15 +386,35 @@ for (loja, cod), a in api.items():
 # pares no banco AUSENTES da API: intencionalmente NÃO tocados.
 ausentes_api = [k for k in db if k not in api]
 
+# 5) ESCRITA — SOMENTE novos_ativos. S→N / N→S / novos_inativos / ausentes: NÃO
+#    escrevem nesta fase (seguem como log). Roda só aqui, já passada a trava.
+print("\n[4] Escrevendo NOVOS ATIVOS (única fase com escrita)…")
+rows_ins = [{
+    "cod_microvix_loja": x["loja"],
+    "cod_vendedor": int(x["cod"]),
+    "nome": x["nome"],
+    "cargo": x["cargo"] or None,
+    "funcao": x["funcao"] or None,
+    "ativo": True,
+    "data_admissao": x["admissao"],   # já None se vazio/sentinela
+    "data_saida": None,
+    "conta_meta": x["conta_meta"],
+    "meta_peso": x["meta_peso"],
+    "usuario_id": None,
+    "atualizado_em": AGORA_BRT,
+} for x in novos_ativos]
+inseridos = upsert_novos_ativos(rows_ins)
+print(f"    enviados ao banco (upsert on_conflict): {inseridos}")
+
 # ── SAÍDA ────────────────────────────────────────────────────────────────────
 def _cod(x):  # ordenação numérica estável
     return (int(x["loja"]), int(x["cod"]) if str(x["cod"]).lstrip("-").isdigit() else 0)
 
 print("\n" + "=" * 74)
-print("RESULTADO DO DRY-RUN (nada foi gravado)")
+print("RESULTADO (escrita só de NOVOS ATIVOS; S→N/N→S apenas logados)")
 print("=" * 74)
 
-print(f"\n── NOVOS ATIVOS (ativo=S; seriam inseridos): {len(novos_ativos)} ──")
+print(f"\n── NOVOS ATIVOS (ativo=S; INSERIDOS: {inseridos}) ──")
 print(f"   {'loja':>4} {'cod':>6} {'admissao':>11} {'conta_meta':>10}  nome")
 for x in sorted(novos_ativos, key=_cod):
     print(f"   {x['loja']:>4} {x['cod']:>6} {str(x['admissao'] or '—'):>11} "
@@ -378,10 +443,12 @@ print(f"  empresas OK:            {empresas_ok}/{len(CNPJS)}")
 print(f"  empresas com erro:      {len(empresas_erro)}  {[c for c,_ in empresas_erro] or ''}")
 print(f"  pares lidos da API:     {total_pares}")
 print(f"  pares no banco:         {len(db)}")
-print(f"  NOVOS ATIVOS (inseriria):              {len(novos_ativos)}")
+print(f"  NOVOS ATIVOS detectados:               {len(novos_ativos)}")
+print(f"  NOVOS ATIVOS INSERIDOS (escrita):      {inseridos}")
 print(f"  novos já-inativos (ignorados/logados): {len(novos_inativos)}")
-print(f"  S→N (carimbaria saída): {len(s_to_n)}")
-print(f"  N→S (revisão):          {len(n_to_s)}")
+print(f"  S→N (só log nesta fase):    {len(s_to_n)}")
+print(f"  N→S (revisão, só log):      {len(n_to_s)}")
 print(f"  no banco, ausentes API: {len(ausentes_api)}  (NÃO tocados)")
-print("\n  ⚠️ DRY-RUN: nenhum INSERT/UPDATE/UPSERT executado. Nenhuma escrita no banco.")
+print("\n  ESCRITA: apenas NOVOS ATIVOS (upsert on_conflict, idempotente).")
+print("  NÃO escritos: S→N, N→S, novos já-inativos, ausentes da API (seguem em log).")
 print("Fim.")
