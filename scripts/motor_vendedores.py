@@ -307,18 +307,29 @@ print(f"    pares no banco: {len(db)}")
 
 # 4) DIFF
 print("\n[3] Calculando diff…")
-novos, s_to_n, n_to_s = [], [], []
+# novos_ativos = pares novos com ativo='S' (seriam inseridos).
+# novos_inativos = pares novos que já vêm ativo='N' (ou sem flag): NÃO inserir —
+#   nunca estiveram no banco, então nunca geram S→N; inofensivos pro divisor
+#   (nunca contam meta). Só logamos pra rastreabilidade.
+novos_ativos, novos_inativos, s_to_n, n_to_s = [], [], [], []
 for (loja, cod), a in api.items():
     nome = limpa_nome(a["nome_raw"]) or f"(cod {cod})"
     api_ativo = ativo_bool(a["ativo_raw"])          # True / False / None
     prev = db.get((loja, cod))
     if prev is None:
-        novos.append({
-            "loja": loja, "cod": cod, "nome": nome,
-            "ativo": api_ativo,
-            "admissao": data_ou_none(a["adm_raw"]),
-            "conta_meta": conta_meta_de(a["nome_raw"], a["funcao_raw"]),
-        })
+        # Regra de inserção: só entra quem está ATIVO='S' agora na API. Se depois
+        # esse par vier 'N', já estará no banco → cai no S→N naturalmente.
+        if api_ativo is True:
+            novos_ativos.append({
+                "loja": loja, "cod": cod, "nome": nome,
+                "ativo": api_ativo,
+                "admissao": data_ou_none(a["adm_raw"]),
+                "conta_meta": conta_meta_de(a["nome_raw"], a["funcao_raw"]),
+            })
+        else:
+            # Novo já inativo (entrou e saiu sem passar por ativo): não inserir.
+            novos_inativos.append({"loja": loja, "cod": cod, "nome": nome,
+                                   "ativo_raw": (a["ativo_raw"] or "").strip() or "?"})
         continue
     prev_ativo = prev["ativo"]                       # bool ou None
     if prev_ativo is True and api_ativo is False:
@@ -338,12 +349,17 @@ print("\n" + "=" * 74)
 print("RESULTADO DO DRY-RUN (nada foi gravado)")
 print("=" * 74)
 
-print(f"\n── NOVOS (seriam inseridos): {len(novos)} ──")
-print(f"   {'loja':>4} {'cod':>6} {'ativo':>6} {'admissao':>11} {'conta_meta':>10}  nome")
-for x in sorted(novos, key=_cod):
-    at = "S" if x["ativo"] else ("N" if x["ativo"] is False else "?")
-    print(f"   {x['loja']:>4} {x['cod']:>6} {at:>6} {str(x['admissao'] or '—'):>11} "
+print(f"\n── NOVOS ATIVOS (ativo=S; seriam inseridos): {len(novos_ativos)} ──")
+print(f"   {'loja':>4} {'cod':>6} {'admissao':>11} {'conta_meta':>10}  nome")
+for x in sorted(novos_ativos, key=_cod):
+    print(f"   {x['loja']:>4} {x['cod']:>6} {str(x['admissao'] or '—'):>11} "
           f"{str(x['conta_meta']):>10}  {x['nome'][:34]}")
+
+print(f"\n── NOVOS JÁ-INATIVOS (NÃO inseridos; só log p/ rastreabilidade): {len(novos_inativos)} ──")
+print("   (novo par que já veio ativo≠'S' — entrou e saiu sem passar por ativo)")
+print(f"   {'loja':>4} {'cod':>6} {'ativo':>5}  nome")
+for x in sorted(novos_inativos, key=_cod):
+    print(f"   ⚠️ {x['loja']:>4} {x['cod']:>6} {x['ativo_raw']:>5}  {x['nome'][:34]}")
 
 print(f"\n── S→N (ativo→inativo; carimbaria data_saida={HOJE_BRT}): {len(s_to_n)} ──")
 print(f"   {'loja':>4} {'cod':>6}  nome  (carimbo: 'sim' se data_saida ainda NULL)")
@@ -362,7 +378,8 @@ print(f"  empresas OK:            {empresas_ok}/{len(CNPJS)}")
 print(f"  empresas com erro:      {len(empresas_erro)}  {[c for c,_ in empresas_erro] or ''}")
 print(f"  pares lidos da API:     {total_pares}")
 print(f"  pares no banco:         {len(db)}")
-print(f"  NOVOS (inseriria):      {len(novos)}")
+print(f"  NOVOS ATIVOS (inseriria):              {len(novos_ativos)}")
+print(f"  novos já-inativos (ignorados/logados): {len(novos_inativos)}")
 print(f"  S→N (carimbaria saída): {len(s_to_n)}")
 print(f"  N→S (revisão):          {len(n_to_s)}")
 print(f"  no banco, ausentes API: {len(ausentes_api)}  (NÃO tocados)")
