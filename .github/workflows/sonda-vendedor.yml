@@ -1,0 +1,36 @@
+# Sonda read-only: registro CRU COMPLETO de UM vendedor no LinxVendedores
+# (todas as colunas <C>, mesmo vazias), pra caçar campo de férias/afastamento.
+# Default: empresa 31 / cod 776 (SARA). NÃO grava nada, NÃO usa Supabase.
+name: Sonda Vendedor (1 registro)
+
+on:
+  workflow_dispatch:
+    inputs:
+      empresa:
+        description: 'cod da empresa (loja)'
+        required: true
+        default: '31'
+      cod_vendedor:
+        description: 'cod do vendedor'
+        required: true
+        default: '776'
+
+concurrency:
+  group: sonda-vendedor
+  cancel-in-progress: false
+
+jobs:
+  sonda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar sonda de 1 vendedor (read-only)
+        env:
+          LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+          EMPRESA: ${{ inputs.empresa }}
+          COD_VENDEDOR: ${{ inputs.cod_vendedor }}
+        run: python scripts/sonda-vendedor.py
