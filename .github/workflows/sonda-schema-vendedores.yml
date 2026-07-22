@@ -1,0 +1,25 @@
+# Sonda read-only: despeja o SCHEMA CRU COMPLETO do LinxVendedores (todas as
+# colunas <C> + valores de exemplo) pra caçar campo de situação/afastamento/
+# férias que os motores nunca mapearam. NÃO grava nada, NÃO usa Supabase.
+name: Sonda Schema Vendedores
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sonda-schema-vendedores
+  cancel-in-progress: false
+
+jobs:
+  sonda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar sonda de schema (read-only)
+        env:
+          LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+        run: python scripts/sonda-schema-vendedores.py
