@@ -10,8 +10,9 @@
 #    (nome/funcao/cargo/data_admissao/meta_peso/conta_meta). Ordem no run:
 #    NOVOS ATIVOS → S→N → ESPELHO (por último; não toca em 'ativo', não conflita).
 #    N→S, novos já-inativos e ausentes da API seguem SÓ como log.
-#    usuario_id NUNCA é enviado; data_saida não vem da API; e `ativo` é EXCLUSIVO
-#    da fase S→N (o espelho não toca em ativo — ver comentário em CAMPOS_ESPELHO).
+#    usuario_id NUNCA é enviado; data_saida não vem da API; `ativo` é EXCLUSIVO
+#    da fase S→N (o espelho não toca em ativo — ver comentário em CAMPOS_ESPELHO);
+#    e data_admissao NUNCA é anulada (só espelha quando a API traz data válida).
 #
 # Fluxo (desenho aprovado):
 #   1. Lê LinxVendedores das 35 empresas (empresa que falha → registra e PULA).
@@ -365,8 +366,11 @@ def patch_espelho(linhas):
     headers = {"apikey": SUPA_KEY, "Authorization": f"Bearer {SUPA_KEY}",
                "Content-Type": "application/json", "Prefer": "return=minimal"}
     for e in linhas:
+        # Filtros de segurança do body: (a) campos proibidos nunca vão; (b)
+        # data_admissao NUNCA é enviada como nula (não anular o divisor).
         body = {c: novo for c, (_atual, novo) in e["mud"].items()
-                if c not in PROIBIDOS_ESPELHO}
+                if c not in PROIBIDOS_ESPELHO
+                and not (c == "data_admissao" and novo is None)}
         if not body:
             continue
         body["atualizado_em"] = AGORA_BRT
@@ -516,6 +520,13 @@ for (loja, cod), a in api.items():
             diverge = _num(atual) != _num(novo)
         elif campo == "conta_meta":
             diverge = atual != novo
+        elif campo == "data_admissao":
+            # NUNCA ANULA: data_admissao é a espinha do divisor por-dia (conta no
+            # dia D se data_admissao <= D). Se a API vier vazia/sentinela (novo is
+            # None), MANTÉM a do banco — anular faria a pessoa sumir do divisor em
+            # TODOS os dias e a meta furaria silenciosamente. Só espelha quando a
+            # API traz data VÁLIDA (preenche se estava nulo, corrige se mudou).
+            diverge = novo is not None and _txt(atual) != _txt(novo)
         else:
             diverge = _txt(atual) != _txt(novo)
         if diverge:
