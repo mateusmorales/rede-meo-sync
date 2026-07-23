@@ -137,24 +137,22 @@ _VEND1 = re.compile(r"\bVENDEDOR 1\b")
 
 
 def conta_meta_de(nome_raw, funcao):
-    """conta_meta com VETO pelo nome. Em meta, o conservador vence: se o cadastro
-    tem GERENTE/SUPERVISOR no NOME, é gerente/supervisor — a `funcao` é que
-    provavelmente está desatualizada. Se for engano, o RH corrige o NOME no
-    Microvix. Ordem:
-    1) funcao == 'GERENTE'                                   → False
-    2) 'GERENTE' ou 'SUPERVISOR' no nome (VETO, mesmo com
-       funcao preenchida como Vendedor)                      → False
-    3) 'VENDEDOR 1' como palavra no nome (não pega 10-19)    → False
-    4) senão                                                 → True
+    """conta_meta por LISTA BRANCA: só quem é EXPLICITAMENTE 'Vendedor' divide a
+    meta. Antes era lista negra ("tudo que não é Gerente divide") — mas funções
+    novas no Microvix (Caixa, Estoquista, Auxiliar…) entrariam no divisor por
+    omissão e furariam a meta. Agora é preventivo: função desconhecida → fora.
+    Ordem:
+    1) 'GERENTE' ou 'SUPERVISOR' no NOME (veto pelo nome, mesmo se funcao='Vendedor') → False
+    2) 'VENDEDOR 1' como palavra no nome (não pega 10-19)    → False
+    3) funcao (upper/trim) == 'VENDEDOR'                     → True
+    4) senão (Caixa, Gerente, função vazia/desconhecida…)   → False
     """
-    if (funcao or "").strip().upper() == "GERENTE":
-        return False
     up = (nome_raw or "").upper()
     if "GERENTE" in up or "SUPERVISOR" in up:      # veto pelo nome
         return False
     if _VEND1.search(up):
         return False
-    return True
+    return (funcao or "").strip().upper() == "VENDEDOR"
 
 
 def _txt(v):
