@@ -6,9 +6,10 @@
 # ⚠️ ESCRITA PARCIAL (esta versão): grava (1) NOVOS ATIVOS (par novo ativo='S')
 #    via upsert on_conflict=(cod_microvix_loja,cod_vendedor); e (2) S→N — PATCH
 #    ativo=false + data_saida=HOJE_BRT (só se estava NULL).
-#    (3) ESPELHO da API em EXISTENTES está em DRY-RUN: calcula e reporta as
-#    divergências (nome/funcao/cargo/data_admissao/meta_peso/conta_meta), mas NÃO
-#    grava. N→S, novos já-inativos e ausentes da API seguem SÓ como log.
+#    e (3) ESPELHO da API em EXISTENTES — PATCH mínimo só dos campos divergentes
+#    (nome/funcao/cargo/data_admissao/meta_peso/conta_meta). Ordem no run:
+#    NOVOS ATIVOS → S→N → ESPELHO (por último; não toca em 'ativo', não conflita).
+#    N→S, novos já-inativos e ausentes da API seguem SÓ como log.
 #    usuario_id NUNCA é enviado; data_saida não vem da API; e `ativo` é EXCLUSIVO
 #    da fase S→N (o espelho não toca em ativo — ver comentário em CAMPOS_ESPELHO).
 #
@@ -349,6 +350,46 @@ def patch_saida(linhas):
     return ativados_off, carimbados
 
 
+# Guarda defensiva: campos que o ESPELHO nunca pode enviar, aconteça o que
+# acontecer (ativo é exclusivo do S→N; usuario_id é elo do app; data_saida não
+# vem da API).
+PROIBIDOS_ESPELHO = {"ativo", "usuario_id", "data_saida"}
+
+
+def patch_espelho(linhas):
+    """ESCRITA do ESPELHO: um PATCH por par (filtro cod_microvix_loja+cod_vendedor)
+    contendo SÓ os campos que divergem (patch mínimo) + atualizado_em.
+    Idempotente: quem já está espelhado não diverge e nem chega aqui.
+    Devolve (patchados, por_campo)."""
+    patchados, por_campo = 0, {}
+    headers = {"apikey": SUPA_KEY, "Authorization": f"Bearer {SUPA_KEY}",
+               "Content-Type": "application/json", "Prefer": "return=minimal"}
+    for e in linhas:
+        body = {c: novo for c, (_atual, novo) in e["mud"].items()
+                if c not in PROIBIDOS_ESPELHO}
+        if not body:
+            continue
+        body["atualizado_em"] = AGORA_BRT
+        url = (f"{SUPA_URL}/rest/v1/vendas_vendedores"
+               f"?cod_microvix_loja=eq.{e['loja']}&cod_vendedor=eq.{e['cod']}")
+        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                     headers=headers, method="PATCH")
+        for tent in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=60):
+                    patchados += 1
+                    for c in body:
+                        if c != "atualizado_em":
+                            por_campo[c] = por_campo.get(c, 0) + 1
+                    break
+            except urllib.error.HTTPError as ex:
+                print(f"      ERRO {ex.code} (loja {e['loja']} cod {e['cod']}): {ex.read().decode()[:160]}")
+                if tent == 2:
+                    raise
+                time.sleep(5)
+    return patchados, por_campo
+
+
 # ── Execução (DRY-RUN) ───────────────────────────────────────────────────────
 print("=" * 74)
 print(f"MOTOR VENDEDORES — escrita: NOVOS ATIVOS + S→N (N→S em log) | {HOJE_BRT} BRT")
@@ -509,6 +550,11 @@ print("\n[5] Escrevendo S→N (ativo=false + carimbo de data_saida se NULL)…")
 sn_off, sn_carimbados = patch_saida(s_to_n)
 print(f"    ativo→false: {sn_off} | data_saida carimbada: {sn_carimbados}")
 
+# ESPELHO por ÚLTIMO: como não toca em 'ativo', não conflita com o S→N acima.
+print("\n[6] Escrevendo ESPELHO (patch mínimo dos campos divergentes)…")
+esp_patchados, esp_por_campo = patch_espelho(espelho)
+print(f"    existentes patchados: {esp_patchados}")
+
 # ── SAÍDA ────────────────────────────────────────────────────────────────────
 def _cod(x):  # ordenação numérica estável
     return (int(x["loja"]), int(x["cod"]) if str(x["cod"]).lstrip("-").isdigit() else 0)
@@ -540,20 +586,17 @@ print(f"   {'loja':>4} {'cod':>6}  nome")
 for x in sorted(n_to_s, key=_cod):
     print(f"   {x['loja']:>4} {x['cod']:>6}  {x['nome'][:34]}")
 
-# ── ESPELHO DA API em EXISTENTES (DRY-RUN — nada gravado nesta fase) ─────────
+# ── ESPELHO DA API em EXISTENTES (ESCRITA LIGADA) ────────────────────────────
 print("\n" + "=" * 74)
-print("ESPELHO DA API em EXISTENTES — DRY-RUN (nada gravado nesta fase)")
+print("ESPELHO DA API em EXISTENTES — PATCHADOS")
 print("=" * 74)
 print(f"  existentes comparados:            {existentes_total}")
 print(f"  com ALGUM campo divergente:       {len(espelho)}")
+print(f"  PATCHADOS (escrita):              {esp_patchados}")
 
-por_campo = {}
-for e in espelho:
-    for c in e["mud"]:
-        por_campo[c] = por_campo.get(c, 0) + 1
-print("\n  resumo por campo (quantos mudariam):")
+print("\n  resumo por campo (quantos foram alterados):")
 for c in CAMPOS_ESPELHO:
-    print(f"    {c:16} {por_campo.get(c, 0)}")
+    print(f"    {c:16} {esp_por_campo.get(c, 0)}")
 
 cm = [e for e in espelho if "conta_meta" in e["mud"]]
 print(f"\n  ⬅⬅ MUDANÇAS DE conta_meta (MEXE NO DIVISOR DA META): {len(cm)}")
@@ -580,10 +623,11 @@ print(f"  S→N detectados:             {len(s_to_n)}")
 print(f"  S→N ativo→false (escrita):  {sn_off}")
 print(f"  S→N data_saida carimbada:   {sn_carimbados}")
 print(f"  N→S (revisão, só log):      {len(n_to_s)}")
-print(f"  ESPELHO: existentes divergentes: {len(espelho)}/{existentes_total}  (DRY-RUN, não gravado)")
-print(f"    dos quais mudariam conta_meta: {len(cm)}")
+print(f"  ESPELHO: divergentes {len(espelho)}/{existentes_total} · PATCHADOS {esp_patchados}")
+print(f"    dos quais mudaram conta_meta: {len(cm)}")
 print(f"  no banco, ausentes API: {len(ausentes_api)}  (NÃO tocados)")
-print("\n  ESCRITA: NOVOS ATIVOS (upsert) + S→N (patch ativo=false / carimbo). Idempotente.")
-print("  NÃO escritos: ESPELHO de existentes (dry-run), N→S, novos já-inativos,")
-print("                ausentes da API (seguem em log). usuario_id nunca é enviado.")
+print("\n  ESCRITA (nesta ordem): NOVOS ATIVOS (upsert) → S→N (ativo/carimbo) →")
+print("                         ESPELHO (patch mínimo dos divergentes). Idempotente.")
+print("  NÃO escritos: N→S, novos já-inativos, ausentes da API (seguem em log).")
+print("  NUNCA enviados pelo espelho: ativo (exclusivo do S→N), usuario_id, data_saida.")
 print("Fim.")
