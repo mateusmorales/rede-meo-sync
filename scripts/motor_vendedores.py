@@ -5,8 +5,12 @@
 #
 # ⚠️ ESCRITA PARCIAL (esta versão): grava (1) NOVOS ATIVOS (par novo ativo='S')
 #    via upsert on_conflict=(cod_microvix_loja,cod_vendedor); e (2) S→N — PATCH
-#    ativo=false + data_saida=HOJE_BRT (só se estava NULL). As demais fases — N→S,
-#    novos já-inativos, ausentes da API — seguem SÓ como log.
+#    ativo=false + data_saida=HOJE_BRT (só se estava NULL).
+#    (3) ESPELHO da API em EXISTENTES está em DRY-RUN: calcula e reporta as
+#    divergências (nome/funcao/cargo/data_admissao/meta_peso/conta_meta), mas NÃO
+#    grava. N→S, novos já-inativos e ausentes da API seguem SÓ como log.
+#    usuario_id NUNCA é enviado; data_saida não vem da API; e `ativo` é EXCLUSIVO
+#    da fase S→N (o espelho não toca em ativo — ver comentário em CAMPOS_ESPELHO).
 #
 # Fluxo (desenho aprovado):
 #   1. Lê LinxVendedores das 35 empresas (empresa que falha → registra e PULA).
@@ -131,20 +135,39 @@ _VEND1 = re.compile(r"\bVENDEDOR 1\b")
 
 
 def conta_meta_de(nome_raw, funcao):
-    """conta_meta=False p/ gerente/supervisor; senão True. Ordem:
+    """conta_meta com VETO pelo nome. Em meta, o conservador vence: se o cadastro
+    tem GERENTE/SUPERVISOR no NOME, é gerente/supervisor — a `funcao` é que
+    provavelmente está desatualizada. Se for engano, o RH corrige o NOME no
+    Microvix. Ordem:
     1) funcao == 'GERENTE'                                   → False
-    2) 'GERENTE' ou 'SUPERVISOR' no nome                     → False
-    3) 'VENDEDOR 1' como palavra no nome (não 10-19)         → False
+    2) 'GERENTE' ou 'SUPERVISOR' no nome (VETO, mesmo com
+       funcao preenchida como Vendedor)                      → False
+    3) 'VENDEDOR 1' como palavra no nome (não pega 10-19)    → False
     4) senão                                                 → True
     """
     if (funcao or "").strip().upper() == "GERENTE":
         return False
     up = (nome_raw or "").upper()
-    if "GERENTE" in up or "SUPERVISOR" in up:
+    if "GERENTE" in up or "SUPERVISOR" in up:      # veto pelo nome
         return False
     if _VEND1.search(up):
         return False
     return True
+
+
+def _txt(v):
+    """Normaliza texto p/ comparar (None e '' são equivalentes)."""
+    return (v or "").strip()
+
+
+def _num(v):
+    """Normaliza numérico p/ comparar (6 casas; None/'' → None)."""
+    if v is None or v == "":
+        return None
+    try:
+        return round(float(str(v).replace(",", ".")), 6)
+    except (TypeError, ValueError):
+        return None
 
 
 # ── API LinxVendedores (idêntico aos motores) ────────────────────────────────
@@ -240,7 +263,8 @@ def ler_estado():
     passo, off = 1000, 0
     while True:
         url = (f"{SUPA_URL}/rest/v1/vendas_vendedores"
-               f"?select=cod_microvix_loja,cod_vendedor,ativo,data_saida,data_admissao")
+               f"?select=cod_microvix_loja,cod_vendedor,nome,cargo,funcao,ativo,"
+               f"data_saida,data_admissao,meta_peso,conta_meta")
         headers = {"apikey": SUPA_KEY, "Authorization": f"Bearer {SUPA_KEY}",
                    "Range-Unit": "items", "Range": f"{off}-{off + passo - 1}"}
         req = urllib.request.Request(url, headers=headers)
@@ -250,9 +274,14 @@ def ler_estado():
             loja = int(x["cod_microvix_loja"])
             cod = norm(x["cod_vendedor"])
             out[(loja, cod)] = {
+                "nome": x.get("nome"),
+                "cargo": x.get("cargo"),
+                "funcao": x.get("funcao"),
                 "ativo": x["ativo"],
                 "data_saida": x["data_saida"],
                 "data_admissao": x["data_admissao"],
+                "meta_peso": x.get("meta_peso"),
+                "conta_meta": x.get("conta_meta"),
             }
         if len(rows) < passo:
             break
@@ -387,6 +416,17 @@ print("\n[3] Calculando diff…")
 #   nunca estiveram no banco, então nunca geram S→N; inofensivos pro divisor
 #   (nunca contam meta). Só logamos pra rastreabilidade.
 novos_ativos, novos_inativos, s_to_n, n_to_s = [], [], [], []
+# espelho = existentes cujo registro DIVERGE da API (campo a campo). DRY-RUN
+# nesta etapa: só calcula e reporta, NÃO grava.
+espelho, existentes_total = [], 0
+# Campos espelhados da API. FORA do espelho, de propósito:
+#   usuario_id — elo com o login do app, não existe na API;
+#   data_saida — não vem da API (só o carimbo do fluxo S→N);
+#   ativo      — EXCLUSIVO da fase S→N. Se o espelho marcasse ativo=false sem
+#                carimbar data_saida junto, a pessoa viraria "inativo sem data" e
+#                sumiria do divisor em TODOS os dias, inclusive os que trabalhou
+#                (furaria a meta retroativamente).
+CAMPOS_ESPELHO = ["nome", "funcao", "cargo", "data_admissao", "meta_peso", "conta_meta"]
 for (loja, cod), a in api.items():
     nome = limpa_nome(a["nome_raw"]) or f"(cod {cod})"
     api_ativo = ativo_bool(a["ativo_raw"])          # True / False / None
@@ -416,6 +456,32 @@ for (loja, cod), a in api.items():
     elif prev_ativo is False and api_ativo is True:
         n_to_s.append({"loja": loja, "cod": cod, "nome": nome})
     # demais casos: sem transição de ativo → nada a fazer
+
+    # ── ESPELHO da API (DRY-RUN): a API é a fonte da verdade do RH. Calcula o
+    #    valor desejado de cada campo espelhado e guarda só o que DIVERGE.
+    existentes_total += 1
+    desejado = {
+        "nome": limpa_nome(a["nome_raw"]),
+        "funcao": _txt(a["funcao_raw"]) or None,
+        "cargo": _txt(a["cargo_raw"]) or None,
+        "data_admissao": data_ou_none(a["adm_raw"]),
+        "meta_peso": meta_ou_none(a["meta_raw"]),
+        "conta_meta": conta_meta_de(a["nome_raw"], a["funcao_raw"]),
+    }
+    mud = {}
+    for campo in CAMPOS_ESPELHO:
+        atual, novo = prev.get(campo), desejado[campo]
+        if campo == "meta_peso":
+            diverge = _num(atual) != _num(novo)
+        elif campo == "conta_meta":
+            diverge = atual != novo
+        else:
+            diverge = _txt(atual) != _txt(novo)
+        if diverge:
+            mud[campo] = (atual, novo)
+    if mud:
+        espelho.append({"loja": loja, "cod": cod, "nome": nome,
+                        "funcao_api": _txt(a["funcao_raw"]), "mud": mud})
 # pares no banco AUSENTES da API: intencionalmente NÃO tocados.
 ausentes_api = [k for k in db if k not in api]
 
@@ -474,6 +540,32 @@ print(f"   {'loja':>4} {'cod':>6}  nome")
 for x in sorted(n_to_s, key=_cod):
     print(f"   {x['loja']:>4} {x['cod']:>6}  {x['nome'][:34]}")
 
+# ── ESPELHO DA API em EXISTENTES (DRY-RUN — nada gravado nesta fase) ─────────
+print("\n" + "=" * 74)
+print("ESPELHO DA API em EXISTENTES — DRY-RUN (nada gravado nesta fase)")
+print("=" * 74)
+print(f"  existentes comparados:            {existentes_total}")
+print(f"  com ALGUM campo divergente:       {len(espelho)}")
+
+por_campo = {}
+for e in espelho:
+    for c in e["mud"]:
+        por_campo[c] = por_campo.get(c, 0) + 1
+print("\n  resumo por campo (quantos mudariam):")
+for c in CAMPOS_ESPELHO:
+    print(f"    {c:16} {por_campo.get(c, 0)}")
+
+cm = [e for e in espelho if "conta_meta" in e["mud"]]
+print(f"\n  ⬅⬅ MUDANÇAS DE conta_meta (MEXE NO DIVISOR DA META): {len(cm)}")
+if cm:
+    print(f"     {'loja':>4} {'cod':>6}  {'funcao (API)':<24} {'de':>5} → {'para':<5}  nome")
+    for e in sorted(cm, key=_cod):
+        de, para = e["mud"]["conta_meta"]
+        fa = e["funcao_api"] or "(vazia)"
+        print(f"     {e['loja']:>4} {e['cod']:>6}  {fa[:24]:<24} {str(de):>5} → {str(para):<5}  {e['nome'][:30]}")
+else:
+    print("     (nenhuma — o divisor da meta não muda)")
+
 print("\n" + "=" * 74)
 print("RESUMO")
 print("=" * 74)
@@ -488,7 +580,10 @@ print(f"  S→N detectados:             {len(s_to_n)}")
 print(f"  S→N ativo→false (escrita):  {sn_off}")
 print(f"  S→N data_saida carimbada:   {sn_carimbados}")
 print(f"  N→S (revisão, só log):      {len(n_to_s)}")
+print(f"  ESPELHO: existentes divergentes: {len(espelho)}/{existentes_total}  (DRY-RUN, não gravado)")
+print(f"    dos quais mudariam conta_meta: {len(cm)}")
 print(f"  no banco, ausentes API: {len(ausentes_api)}  (NÃO tocados)")
 print("\n  ESCRITA: NOVOS ATIVOS (upsert) + S→N (patch ativo=false / carimbo). Idempotente.")
-print("  NÃO escritos: N→S, novos já-inativos, ausentes da API (seguem em log).")
+print("  NÃO escritos: ESPELHO de existentes (dry-run), N→S, novos já-inativos,")
+print("                ausentes da API (seguem em log). usuario_id nunca é enviado.")
 print("Fim.")
