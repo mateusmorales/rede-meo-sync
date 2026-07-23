@@ -6,7 +6,7 @@
 # ⚠️ ESCRITA PARCIAL (esta versão): grava (1) NOVOS ATIVOS (par novo ativo='S')
 #    via upsert on_conflict=(cod_microvix_loja,cod_vendedor); e (2) S→N — PATCH
 #    ativo=false + data_saida=HOJE_BRT (só se estava NULL).
-#    e (3) ESPELHO da API em EXISTENTES — PATCH mínimo só dos campos divergentes
+#    e (3) ESPELHO da API em EXISTENTES ATIVOS — PATCH mínimo só dos campos divergentes
 #    (nome/funcao/cargo/data_admissao/meta_peso/conta_meta). Ordem no run:
 #    NOVOS ATIVOS → S→N → ESPELHO (por último; não toca em 'ativo', não conflita).
 #    N→S, novos já-inativos e ausentes da API seguem SÓ como log.
@@ -500,8 +500,16 @@ for (loja, cod), a in api.items():
         n_to_s.append({"loja": loja, "cod": cod, "nome": nome})
     # demais casos: sem transição de ativo → nada a fazer
 
-    # ── ESPELHO da API (DRY-RUN): a API é a fonte da verdade do RH. Calcula o
-    #    valor desejado de cada campo espelhado e guarda só o que DIVERGE.
+    # ── ESPELHO só em ATIVOS (nosso banco ativo=true). Inativo é intocado pelo
+    #    espelho: o divisor já o ignora (vínculo exclui inativo sem data_saida),
+    #    então patchar nome/funcao/conta_meta nele é ruído inútil. Se um dia voltar
+    #    a ativo, cai no N→S (log/revisão) e o espelho passa a cuidar dele. S→N/N→S
+    #    acima continuam vendo TODOS (o S→N precisa detectar quem saiu).
+    if prev_ativo is not True:
+        continue
+
+    # ── ESPELHO da API: a API é a fonte da verdade do RH. Calcula o valor
+    #    desejado de cada campo espelhado e guarda só o que DIVERGE.
     existentes_total += 1
     desejado = {
         "nome": limpa_nome(a["nome_raw"]),
@@ -599,7 +607,7 @@ for x in sorted(n_to_s, key=_cod):
 print("\n" + "=" * 74)
 print("ESPELHO DA API em EXISTENTES — PATCHADOS")
 print("=" * 74)
-print(f"  existentes comparados:            {existentes_total}")
+print(f"  existentes ATIVOS comparados:     {existentes_total}")
 print(f"  com ALGUM campo divergente:       {len(espelho)}")
 print(f"  PATCHADOS (escrita):              {esp_patchados}")
 
