@@ -1,0 +1,46 @@
+name: Motor E1 - Foto de Estoque
+
+# Disparo APENAS manual/externo (workflow_dispatch). O agendamento é pelo
+# cron-job.org, mesmo padrão do Motor 3 — o cron nativo do Actions atrasa.
+on:
+  workflow_dispatch:
+    inputs:
+      data:
+        description: 'data_inventario YYYY-MM-DD (vazio = ontem)'
+        required: false
+        type: string
+      loja:
+        description: 'cod_microvix de UMA loja (vazio = todas as ativas)'
+        required: false
+        type: string
+      dry_run:
+        description: 'dry-run: monta o payload mas NAO grava'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  foto_estoque:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar Motor E1
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+          IN_DATA: ${{ inputs.data }}
+          IN_LOJA: ${{ inputs.loja }}
+          IN_DRY: ${{ inputs.dry_run }}
+        # Monta os args SÓ com o que veio preenchido (input vazio → sem flag).
+        # O exit code do python PROPAGA (sem "|| true"): falha marca o job vermelho.
+        run: |
+          args=""
+          if [ -n "$IN_DATA" ]; then args="$args --data $IN_DATA"; fi
+          if [ -n "$IN_LOJA" ]; then args="$args --loja $IN_LOJA"; fi
+          if [ "$IN_DRY" = "true" ]; then args="$args --dry-run"; fi
+          echo "Comando: python scripts/motor-e1-estoque.py$args"
+          python scripts/motor-e1-estoque.py $args
