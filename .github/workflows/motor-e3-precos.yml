@@ -1,0 +1,52 @@
+name: Motor E3 - Precos de Varejo
+
+# Disparo APENAS manual/externo (workflow_dispatch). O agendamento é pelo
+# cron-job.org, mesmo padrão do Motor E1 / Motor 3 — o cron nativo do Actions
+# atrasa. NÃO adicionar bloco "schedule" (padrão do projeto).
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run: varre a API e resume, mas NAO grava'
+        required: false
+        type: boolean
+        default: false
+
+# Trava de concorrência: se o cron-job.org disparar em duplicidade, uma execução
+# não sobe em cima da outra (duas varreduras de ~200 mil produtos ao mesmo tempo).
+# cancel-in-progress: false → a 2ª ESPERA a 1ª terminar, não a mata no meio.
+concurrency:
+  group: motor-e3-precos
+  cancel-in-progress: false
+
+jobs:
+  carregar_precos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar Motor E3
+        env:
+          # Exatamente os dois secrets do E1. A URL do Supabase é hardcoded no
+          # carregar-precos.py (padrão do motor-e1-estoque.py) — não é secret.
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+          IN_DRY: ${{ inputs.dry_run }}
+        # set -o pipefail: com o `tee`, sem isso o exit code seria o do tee (0) e a
+        # falha do python (travas: 0 registros / varredura c/ aviso / <180k distintos
+        # / descarte>0) NÃO pintaria o job de vermelho. Com pipefail, o != 0 PROPAGA.
+        run: |
+          set -o pipefail
+          args=""
+          if [ "$IN_DRY" = "true" ]; then args="$args --dry-run"; fi
+          echo "Comando: python3 scripts/carregar-precos.py$args"
+          python3 scripts/carregar-precos.py $args 2>&1 | tee motor-e3-precos.log
+      - name: Subir log (sempre, mesmo em falha)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: motor-e3-precos-log
+          path: motor-e3-precos.log
