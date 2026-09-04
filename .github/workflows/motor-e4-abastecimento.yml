@@ -1,0 +1,65 @@
+name: Motor E4 - Grade de Abastecimento
+
+# Disparo APENAS manual/externo (workflow_dispatch). O agendamento é pelo
+# cron-job.org, mesmo padrão do Motor E1 — o cron nativo do Actions atrasa.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'dry-run: gera e confere a grade mas NAO publica'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Rodar Motor E4
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          IN_DRY: ${{ inputs.dry_run }}
+        # Monta os args SÓ com o que veio preenchido (input vazio → sem flag).
+        # O exit code do python PROPAGA (sem "|| true"): falha marca o job vermelho.
+        run: |
+          args=""
+          if [ "$IN_DRY" = "true" ]; then args="$args --dry-run"; fi
+          echo "Comando: python scripts/motor-e4-abastecimento.py$args"
+          python scripts/motor-e4-abastecimento.py $args
+
+      # ── PUBLICAÇÃO ────────────────────────────────────────────────────────
+      # Este repo é PÚBLICO: saida/ está no .gitignore e NADA de dado é
+      # commitado aqui. O dado só vive no rede-meo-dados (privado).
+      - name: Checkout do rede-meo-dados
+        if: ${{ !inputs.dry_run }}
+        uses: actions/checkout@v4
+        with:
+          repository: mateusmorales/rede-meo-dados
+          ref: main
+          token: ${{ secrets.DADOS_TOKEN }}
+          path: dados
+
+      - name: Publicar grade no rede-meo-dados
+        if: ${{ !inputs.dry_run }}
+        # Commita SÓ se houver mudança: grade idêntica não gera commit vazio.
+        run: |
+          cp saida/grade.csv saida/manifesto.json dados/
+          DATA=$(python -c "import json;print(json.load(open('saida/manifesto.json'))['data_estoque'])")
+          LINHAS=$(python -c "import json;print(json.load(open('saida/manifesto.json'))['linhas'])")
+          cd dados
+          git config user.name "motor-e4"
+          git config user.email "motor-e4@redemeo.com.br"
+          git add grade.csv manifesto.json
+          if git diff --cached --quiet; then
+            echo "Nada mudou na grade — sem commit."
+          else
+            git commit -m "grade $DATA — $LINHAS linhas"
+            git push origin HEAD:main
+            echo "Publicado: grade $DATA — $LINHAS linhas"
+          fi

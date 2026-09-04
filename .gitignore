@@ -1,0 +1,8 @@
+# Este repo é PÚBLICO: saída dos motores NUNCA é commitada aqui.
+# O dado só vive no rede-meo-dados (privado).
+saida/
+
+# lixo de sistema / python
+.DS_Store
+__pycache__/
+*.pyc
