@@ -128,7 +128,7 @@ def pos_sync(cur):
         print(f'⚠️  PLANOS COM MOVIMENTO E SEM LINHA NO DRE ({len(orf)}):', flush=True)
         for nome, v in orf:
             print(f'      {v:>12,.2f}  {nome}', flush=True)
-    cur.execute('select count(*) from financeiro.f360_rejeicao where not resolvida')
+    cur.execute('select financeiro.f360_rejeicoes_pendentes()')
     print(f'   rejeicoes pendentes em f360_rejeicao: {cur.fetchone()[0]}', flush=True)
 
 
