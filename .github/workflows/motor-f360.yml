@@ -1,0 +1,39 @@
+name: Motor F360
+
+on:
+  workflow_dispatch:
+    inputs:
+      camada:
+        description: 'Camada a executar'
+        type: choice
+        default: incremental
+        options: [incremental, recarga_curta, recarga_longa]
+  schedule:
+    - cron: '0 9 * * *'     # 06:00 BRT · diária · incremental
+    - cron: '30 9 * * 0'    # domingo 06:30 BRT · recarga_curta (3 competências)
+    - cron: '0 10 1 * *'    # dia 1º 07:00 BRT · recarga_longa (ano corrente)
+
+concurrency:
+  group: motor-f360
+  cancel-in-progress: false
+
+jobs:
+  motor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install --quiet psycopg2-binary
+      - name: Executar motor
+        env:
+          F360_KEY: ${{ secrets.F360_KEY }}
+          FINANCEIRO_DATABASE_URL: ${{ secrets.FINANCEIRO_DATABASE_URL }}
+          CAMADA: >-
+            ${{ github.event.inputs.camada
+                || (github.event.schedule == '30 9 * * 0' && 'recarga_curta')
+                || (github.event.schedule == '0 10 1 * *' && 'recarga_longa')
+                || 'incremental' }}
+        run: python motores/f360/motor_f360.py "$CAMADA"
