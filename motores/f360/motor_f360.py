@@ -218,9 +218,7 @@ def recarga_competencias(cur, camada, meses):
         tot, rej = sync(cur, 'f360_sync_cartoes', camada, 'Venda', ini, fim, cart)
         print(f'   cartoes:  {len(cart)} | {dict(tot)} | rejeitadas {len(rej)}', flush=True)
         # reconciliação de contagem (exclusão é invisível ao incremental)
-        cur.execute("""select count(*) from financeiro.f360_parcela p
-                        where p.origem='titulo' and exists (select 1 from financeiro.f360_rateio r
-                              where r.parcela_id=p.parcela_id and r.competencia=%s)""", (f'{ano}-{mes:02d}',))
+        cur.execute("select financeiro.f360_reconciliar_competencia(%s)", (f'{ano}-{mes:02d}',))
         no_banco = cur.fetchone()[0]
         ids_api = {p['ParcelaId'] for p in parc}
         print(f'   reconciliacao {ano}-{mes:02d}: {len(ids_api)} parcelas na API x {no_banco} no banco com rateio nesta competencia', flush=True)
