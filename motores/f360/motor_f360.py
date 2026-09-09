@@ -19,7 +19,7 @@ Regras (MANUAL-api-f360-v4):
   Pausa de 0,5 s entre páginas: ~45 chamadas seguidas travam a tela do F360 para quem está logado
 """
 import os, sys, json, time, calendar, collections, datetime as dt
-import urllib.request, urllib.parse, urllib.error
+import urllib.request, urllib.parse, urllib.error, http.client
 import psycopg2, psycopg2.extras
 
 B = 'https://financas.f360.com.br'
@@ -46,11 +46,12 @@ def _get(jwt, path, params=None, tentativas=3):
             if not d.get('Ok'):
                 raise RuntimeError(f'API nao-OK em {path}: {str(d)[:200]}')
             return d['Result']
-        except (urllib.error.URLError, RuntimeError, json.JSONDecodeError) as e:
+        except (OSError, RuntimeError, json.JSONDecodeError, http.client.HTTPException) as e:
+            # OSError cobre TimeoutError, ConnectionError e urllib.error.URLError/HTTPError
             if t == tentativas:
                 raise
-            print(f'   retry {t} em {path}: {str(e)[:120]}', flush=True)
-            time.sleep(15 * t)
+            print(f'   retry {t}/{tentativas} em {path}: {type(e).__name__}: {str(e)[:120]}', flush=True)
+            time.sleep(20 * t)
 
 
 def listar_parcelas(jwt, tipo, ini, fim, tipo_datas):
