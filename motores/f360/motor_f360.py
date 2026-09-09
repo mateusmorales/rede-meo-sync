@@ -129,7 +129,32 @@ def pos_sync(cur):
         for nome, v in orf:
             print(f'      {v:>12,.2f}  {nome}', flush=True)
     cur.execute('select financeiro.f360_rejeicoes_pendentes()')
-    print(f'   rejeicoes pendentes em f360_rejeicao: {cur.fetchone()[0]}', flush=True)
+    print(f'   rejeicoes: {cur.fetchone()[0]}', flush=True)
+
+    # ---- trava do DRE: os meses fechados continuam iguais ao que foram fechados? ----
+    cur.execute('select financeiro.dre_auditar()')
+    a = cur.fetchone()[0]
+    if a['fechamentos_conferidos'] == 0:
+        print('   dre: nenhum mes fechado ainda', flush=True)
+    elif a['divergentes'] > 0:
+        print(f"\u26a0\ufe0f  DRE FECHADO MUDOU \u2014 {a['divergentes']} de {a['fechamentos_conferidos']} fechamentos:", flush=True)
+        for d in a['detalhe']:
+            print(f"      loja {d['loja']} \u00b7 {d['competencia']} \u00b7 resultado "
+                  f"{d['resultado_no_fechamento']} \u2192 {d['resultado_agora']}", flush=True)
+            for x in d['linhas_que_mudaram']:
+                print(f"         linha {x['linha']}: {x['no_fechamento']} \u2192 {x['agora']} ({x['diferenca']:+.2f})", flush=True)
+    else:
+        msg = f"   dre: {a['fechamentos_conferidos']} fechamentos conferidos, nenhum mudou"
+        if a['voltaram_ao_normal']: msg += f" ({a['voltaram_ao_normal']} voltaram ao normal)"
+        print(msg, flush=True)
+
+    # ---- lancamento que caiu em mes JA FECHADO ----
+    cur.execute('select financeiro.dre_retroativos_contagem(7)')
+    r = cur.fetchone()[0]
+    if r['lancamentos']:
+        print(f"\u26a0\ufe0f  {r['lancamentos']} lancamentos entraram em MES JA FECHADO nos ultimos 7 dias "
+              f"({r['lojas']} lojas, {r['competencias_afetadas']} competencias, R$ {r['valor']:,.2f})", flush=True)
+        print('      detalhe: select * from financeiro.dre_retroativos_em_mes_fechado(7)', flush=True)
 
 
 # ----------------------------------------------------------------------------- JANELAS
