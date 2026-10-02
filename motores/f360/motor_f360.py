@@ -73,13 +73,25 @@ def _post(jwt, path, corpo, tentativas=3):
             time.sleep(20 * t)
 
 
+def extrato_vazio(res, pag, ini, fim):
+    """Resposta do F360 para conta sem movimento na janela (ex.: loja ainda não aberta):
+    página 1, Extratos = [], SEM QuantidadeDePaginas, Filtros com as datas pedidas."""
+    f = res.get('Filtros')
+    return (pag == 1 and res.get('Pagina') == 1 and res.get('Extratos') == []
+            and 'QuantidadeDePaginas' not in res and isinstance(f, dict)
+            and f.get('DataInicio') == ini and f.get('DataFim') == fim)
+
+
 def listar_extrato(jwt, cnpj, ini, fim):
-    """Todas as páginas da janela, na ordem da API. Qualquer falha propaga: janela incompleta não é enviada."""
+    """Todas as páginas da janela, na ordem da API. Qualquer falha propaga: janela incompleta não é enviada.
+    Devolve None quando o F360 responde 'sem movimento' (extrato_vazio)."""
     out, pag = [], 1
     while True:
         res = _post(jwt, '/ExtratoBancarioPublicAPI/ObterExtratoBancario',
                     {'DataInicio': ini, 'DataFim': fim, 'CNPJEmpresas': [cnpj], 'Status': 'Todos',
                      'ModeloRelatorio': 'Sintetico', 'Pagina': pag})
+        if extrato_vazio(res, pag, ini, fim):
+            return None
         if not isinstance(res.get('Extratos'), list) or 'QuantidadeDePaginas' not in res:
             raise RuntimeError(f'resposta sem Extratos/QuantidadeDePaginas na pagina {pag}: {str(res)[:200]}')
         out += res['Extratos']
@@ -278,6 +290,10 @@ def sync_extrato_janela(cur, jwt, cnpj, conta, ini, fim, resumo):
         resumo['erros'] += 1
         print(f'   ⚠️  {conta} {ini}..{fim}: download falhou, janela NAO enviada — {type(e).__name__}: {str(e)[:150]}', flush=True)
         return
+    if todos is None:
+        resumo['vazias'] += 1
+        print(f'   {conta} {ini}..{fim}: sem movimento no F360 (janela nao enviada)', flush=True)
+        return
     itens = [x for x in todos if x.get('Conta') == conta]
     try:
         cur.execute('select financeiro.f360_sync_extrato(%s,%s,%s,%s)',
@@ -304,9 +320,10 @@ def extrato_rodar(cur, janelas):
             sync_extrato_janela(cur, jwt, cnpj, conta, ini, fim, resumo)
         resumos.append((conta, resumo))
     print('== RESUMO EXTRATO', flush=True)
-    print(f"   {'conta':<28} {'janelas':>8} {'lancamentos':>12} {'erros':>6}", flush=True)
+    print(f"   {'conta':<28} {'janelas':>8} {'lancamentos':>12} {'erros':>6} {'vazias':>7}", flush=True)
     for conta, r in resumos:
-        print(f"   {conta:<28} {r['janelas']:>8} {r['gravados']:>12} {r['erros']:>6}{'  ⚠️' if r['erros'] else ''}", flush=True)
+        print(f"   {conta:<28} {r['janelas']:>8} {r['gravados']:>12} {r['erros']:>6} {r['vazias']:>7}"
+              f"{'  ⚠️' if r['erros'] else ''}", flush=True)
     return sum(r['erros'] for _, r in resumos)
 
 
