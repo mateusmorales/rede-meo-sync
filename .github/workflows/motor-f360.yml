@@ -4,6 +4,7 @@ name: Motor F360
 #   diário   06:00 BRT  -> inputs.camada = incremental
 #   domingo  06:30 BRT  -> inputs.camada = recarga_curta
 #   dia 1º   07:00 BRT  -> inputs.camada = recarga_longa
+# O extrato bancário diário roda dentro do incremental. extrato_carga é só manual.
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +12,15 @@ on:
         description: 'Camada a executar'
         type: choice
         default: incremental
-        options: [incremental, recarga_curta, recarga_longa]
+        options: [incremental, recarga_curta, recarga_longa, extrato_diario, extrato_carga]
+      extrato_ini:
+        description: 'extrato_carga: data inicial (AAAA-MM-DD)'
+        type: string
+        default: '2025-01-01'
+      extrato_fim:
+        description: 'extrato_carga: data final (AAAA-MM-DD, vazio = hoje)'
+        type: string
+        default: ''
 
 concurrency:
   group: motor-f360
@@ -32,4 +41,6 @@ jobs:
           F360_KEY: ${{ secrets.F360_KEY }}
           FINANCEIRO_DATABASE_URL: ${{ secrets.FINANCEIRO_DATABASE_URL }}
           CAMADA: ${{ github.event.inputs.camada || 'incremental' }}
+          EXTRATO_INI: ${{ github.event.inputs.extrato_ini }}
+          EXTRATO_FIM: ${{ github.event.inputs.extrato_fim }}
         run: python motores/f360/motor_f360.py "$CAMADA"

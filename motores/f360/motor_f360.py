@@ -7,6 +7,8 @@ Camadas:
   incremental    diária 06:00 BRT · parcelas + cartões por tipoDatas=Atualização, janela 7 dias · cadastros
   recarga_curta  domingo          · 3 últimas competências completas (pega exclusão) · cadastros
   recarga_longa  dia 1º           · ano corrente completo · cadastros
+  extrato_diario também roda ao fim do incremental · extrato bancário das contas SANTANDER, últimos 10 dias
+  extrato_carga  manual           · extrato bancário mês a mês, EXTRATO_INI..EXTRATO_FIM (padrão 2025-01-01..hoje)
 
 Variáveis de ambiente (GitHub Secrets):
   F360_KEY                chave da API pública F360 Finanças
@@ -52,6 +54,40 @@ def _get(jwt, path, params=None, tentativas=3):
                 raise
             print(f'   retry {t}/{tentativas} em {path}: {type(e).__name__}: {str(e)[:120]}', flush=True)
             time.sleep(20 * t)
+
+
+def _post(jwt, path, corpo, tentativas=3):
+    rq = urllib.request.Request(B + path, data=json.dumps(corpo).encode(),
+                                headers={'Authorization': 'Bearer ' + jwt,
+                                         'Content-Type': 'application/json'})
+    for t in range(1, tentativas + 1):
+        try:
+            d = json.loads(urllib.request.urlopen(rq, timeout=180).read().decode('utf-8-sig'))
+            if d.get('Ok') is False or not isinstance(d.get('Result'), dict):
+                raise RuntimeError(f'API nao-OK/sem Result em {path}: {str(d)[:200]}')
+            return d['Result']
+        except (OSError, RuntimeError, json.JSONDecodeError, http.client.HTTPException) as e:
+            if t == tentativas:
+                raise
+            print(f'   retry {t}/{tentativas} em {path}: {type(e).__name__}: {str(e)[:120]}', flush=True)
+            time.sleep(20 * t)
+
+
+def listar_extrato(jwt, cnpj, ini, fim):
+    """Todas as páginas da janela, na ordem da API. Qualquer falha propaga: janela incompleta não é enviada."""
+    out, pag = [], 1
+    while True:
+        res = _post(jwt, '/ExtratoBancarioPublicAPI/ObterExtratoBancario',
+                    {'DataInicio': ini, 'DataFim': fim, 'CNPJEmpresas': [cnpj], 'Status': 'Todos',
+                     'ModeloRelatorio': 'Sintetico', 'Pagina': pag})
+        if not isinstance(res.get('Extratos'), list) or 'QuantidadeDePaginas' not in res:
+            raise RuntimeError(f'resposta sem Extratos/QuantidadeDePaginas na pagina {pag}: {str(res)[:200]}')
+        out += res['Extratos']
+        if pag >= res['QuantidadeDePaginas']:
+            break
+        pag += 1
+        time.sleep(PAUSA)
+    return out
 
 
 def listar_parcelas(jwt, tipo, ini, fim, tipo_datas):
@@ -227,6 +263,80 @@ def recarga_competencias(cur, camada, meses):
     pos_sync(cur)
 
 
+# ----------------------------------------------------------------------------- EXTRATO BANCÁRIO
+# Carga por substituição de janela: f360_sync_extrato APAGA a conta na janela e grava o que vier.
+# Por isso só se envia janela completa (todas as páginas OK), uma chamada por conta+janela.
+def extrato_contas(cur):
+    cur.execute('select cnpj, conta, cod_prefixo from financeiro.f360_extrato_contas() order by cod_prefixo')
+    return cur.fetchall()
+
+
+def sync_extrato_janela(cur, jwt, cnpj, conta, ini, fim, resumo):
+    try:
+        todos = listar_extrato(jwt, cnpj, ini, fim)
+    except Exception as e:
+        resumo['erros'] += 1
+        print(f'   ⚠️  {conta} {ini}..{fim}: download falhou, janela NAO enviada — {type(e).__name__}: {str(e)[:150]}', flush=True)
+        return
+    itens = [x for x in todos if x.get('Conta') == conta]
+    try:
+        cur.execute('select financeiro.f360_sync_extrato(%s,%s,%s,%s)',
+                    (cnpj, ini, fim, psycopg2.extras.Json(itens)))
+        r = cur.fetchone()[0]
+    except Exception as e:
+        resumo['erros'] += 1
+        print(f'   ⚠️  {conta} {ini}..{fim}: f360_sync_extrato falhou — {type(e).__name__}: {str(e)[:200]}', flush=True)
+        return
+    resumo['janelas'] += 1
+    resumo['gravados'] += len(itens)
+    print(f'   {conta} {ini}..{fim}: api {len(todos)} | desta conta {len(itens)} | banco {json.dumps(r, ensure_ascii=False)}', flush=True)
+
+
+def extrato_rodar(cur, janelas):
+    contas = extrato_contas(cur)
+    resumos = []
+    for cnpj, conta, cod in contas:
+        resumo = collections.Counter()
+        jwt = login()
+        for i, (ini, fim) in enumerate(janelas):
+            if i:
+                time.sleep(PAUSA)
+            sync_extrato_janela(cur, jwt, cnpj, conta, ini, fim, resumo)
+        resumos.append((conta, resumo))
+    print('== RESUMO EXTRATO', flush=True)
+    print(f"   {'conta':<28} {'janelas':>8} {'lancamentos':>12} {'erros':>6}", flush=True)
+    for conta, r in resumos:
+        print(f"   {conta:<28} {r['janelas']:>8} {r['gravados']:>12} {r['erros']:>6}{'  ⚠️' if r['erros'] else ''}", flush=True)
+    return sum(r['erros'] for _, r in resumos)
+
+
+def camada_extrato_diario(cur, dias=10):
+    fim = hoje_brt()
+    ini = fim - dt.timedelta(days=dias)
+    print(f'== EXTRATO DIARIO {ini}..{fim}', flush=True)
+    return extrato_rodar(cur, [(ini.isoformat(), fim.isoformat())])
+
+
+def janelas_mensais(ini, fim):
+    out, a, m = [], ini.year, ini.month
+    while (a, m) <= (fim.year, fim.month):
+        mi, mf = mes_ini_fim(a, m)
+        out.append((max(mi, ini.isoformat()), min(mf, fim.isoformat())))
+        a, m = (a + 1, 1) if m == 12 else (a, m + 1)
+    return out
+
+
+def camada_extrato_carga(cur):
+    ini = dt.date.fromisoformat(os.environ.get('EXTRATO_INI') or '2025-01-01')
+    fim = dt.date.fromisoformat(os.environ.get('EXTRATO_FIM') or hoje_brt().isoformat())
+    janelas = janelas_mensais(ini, fim)
+    print(f'== EXTRATO CARGA {ini}..{fim} · {len(janelas)} janelas mensais por conta', flush=True)
+    erros = extrato_rodar(cur, janelas)
+    if erros:
+        print(f'⚠️  {erros} janelas com erro — rode de novo o periodo para reenviar', flush=True)
+        sys.exit(1)
+
+
 def camada_recarga_curta(cur):
     recarga_competencias(cur, 'recarga_curta', ultimas_competencias(3))
 
@@ -246,7 +356,15 @@ if __name__ == '__main__':
     try:
         {'incremental': camada_incremental,
          'recarga_curta': camada_recarga_curta,
-         'recarga_longa': camada_recarga_longa}[camada](cur)
+         'recarga_longa': camada_recarga_longa,
+         'extrato_diario': camada_extrato_diario,
+         'extrato_carga': camada_extrato_carga}[camada](cur)
+        if camada == 'incremental':
+            # extrato roda DEPOIS de títulos/cartões; falha aqui só avisa, não derruba o motor
+            try:
+                camada_extrato_diario(cur)
+            except Exception as e:
+                print(f'⚠️  EXTRATO DIARIO falhou: {type(e).__name__}: {str(e)[:200]}', flush=True)
     finally:
         con.close()
     print(f'FIM · {(time.time() - t0)/60:.1f} min', flush=True)
