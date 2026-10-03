@@ -13,7 +13,13 @@
 #      sozinha. O dict CNPJS serve SÓ pra traduzir cod_microvix → cnpjEmp.
 #   2) Por loja (ordem crescente de cod_microvix): LinxProdutosInventario com
 #      cod_deposito=1,7 (OBRIGATÓRIO — sem ele a API devolve só o depósito 1,
-#      calada). data_inventario = ONTEM (validada ao centavo) ou --data.
+#      calada). data_inventario = data_foto = O DIA A QUE A POSIÇÃO SE REFERE:
+#        antes das HORA_CORTE (BRT, lojas fechadas) → ONTEM = fechamento (carga das 5h)
+#        a partir das HORA_CORTE                    → HOJE  = posição do momento
+#      (teste 03/10, loja 31: a API honra a data — 30/09 bateu ao md5 com o histórico —
+#      e data=hoje reflete a venda de minutos antes, separando dep 1 e 7.) Ou --data.
+#      Produto que zera NÃO vem na resposta: só o DELETE+INSERT por loja inteira o
+#      remove do banco. NÃO trocar por upsert incremental.
 #   3) Grava via RPC gravar_estoque_loja (DELETE+INSERT em transação no servidor,
 #      recusa payload vazio). Loga {loja_id, antes, gravados, variacao}.
 #      API devolveu 0 linhas → NÃO chama a RPC (ALERTA, segue).
@@ -27,7 +33,7 @@
 #   export LINX_CHAVE="..."; export SUPABASE_SERVICE_KEY="...service_role..."
 #   python3 scripts/motor-e1-estoque.py --dry-run
 #   python3 scripts/motor-e1-estoque.py --limit 3
-#   python3 scripts/motor-e1-estoque.py              # foto de ONTEM, todas as lojas
+#   python3 scripts/motor-e1-estoque.py              # madrugada: fechamento de ONTEM; de dia: posição de AGORA
 # =============================================================================
 
 import os
@@ -38,7 +44,7 @@ import argparse
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 
 CHAVE = os.environ.get("LINX_CHAVE")
 SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -48,6 +54,12 @@ LINX = "https://webapi.microvix.com.br/1.0/api/integracao"
 TIMEOUT = 600  # inventário cheio de uma loja pode ser grande
 
 COD_DEP = "1,7"  # ESTOQUE(1) + OUTLET(7) — OBRIGATÓRIO em toda chamada.
+
+# Fuso FIXO de Brasília (sem horário de verão desde 2019). O runner do Actions roda em UTC.
+BRT = timezone(timedelta(hours=-3))
+# Antes desta hora (BRT) a carga é de MADRUGADA → fechamento de ontem. A loja que abre
+# mais cedo abre às 09:00; o cron-job das 05:00 cai sempre antes do corte.
+HORA_CORTE = 7
 
 # CNPJs por cod_microvix — MESMA fonte dos motores (dict, não é segredo). Serve
 # SÓ pra traduzir cod_microvix → cnpjEmp. A LISTA de lojas vem do BANCO.
@@ -231,6 +243,13 @@ def extrair_itens(cols, regs):
     return itens, dep1, dep7, len(distintos), descartadas, outros_dep, None
 
 
+def escolher_data(agora):
+    """(data, descrição). Madrugada → ontem (fechamento); durante o dia → hoje (momento)."""
+    if agora.hour < HORA_CORTE:
+        return (agora.date() - timedelta(days=1)).isoformat(), "FECHAMENTO de ontem (madrugada)"
+    return agora.date().isoformat(), f"POSIÇÃO DO MOMENTO ({agora:%H:%M} BRT)"
+
+
 def kb(payload):
     return len(json.dumps(payload).encode("utf-8")) / 1024.0
 
@@ -246,10 +265,14 @@ def main():
     args = ap.parse_args()
     exigir_env()
 
-    data_inv = args.data or (date.today() - timedelta(days=1)).isoformat()
+    # data_inv é ao mesmo tempo o data_inventario pedido à Linx e o data_foto gravado.
+    if args.data:
+        data_inv, desc_data = args.data, "data informada (--data)"
+    else:
+        data_inv, desc_data = escolher_data(datetime.now(BRT))
 
     print("=" * 78)
-    print(f"MOTOR E1 — foto de estoque | data_inventario={data_inv} | cod_deposito={COD_DEP}"
+    print(f"MOTOR E1 — foto de estoque | data_inventario=data_foto={data_inv} [{desc_data}] | cod_deposito={COD_DEP}"
           f" | modo={'DRY-RUN' if args.dry_run else 'GRAVAÇÃO'}")
     print("=" * 78)
 
