@@ -9,6 +9,8 @@ Camadas:
   recarga_longa  dia 1º           · ano corrente completo · cadastros
   extrato_diario também roda ao fim do incremental · extrato bancário das contas SANTANDER, últimos 10 dias
   extrato_carga  manual           · extrato bancário mês a mês, EXTRATO_INI..EXTRATO_FIM (padrão 2025-01-01..hoje)
+  conferir_abertos também roda no incremental (antes do pos_sync) · despesas em aberto do F360 x banco;
+                 ausente em 2 dias diferentes → cancelada (financeiro.f360_conferir_abertos)
 
 Variáveis de ambiente (GitHub Secrets):
   F360_KEY                chave da API pública F360 Finanças
@@ -28,6 +30,11 @@ B = 'https://financas.f360.com.br'
 PAUSA = 0.5
 LOTE = 500
 BRT = dt.timezone(dt.timedelta(hours=-3))
+
+# conferência diária dos títulos em aberto
+CONF_ABERTOS_DIAS = 30            # janela começa em hoje - 30 dias (vencimento)
+CONF_ABERTOS_FIM = '2027-12-31'   # TODO: virar "fim do ano seguinte"
+STATUS_ABERTOS = 'Aberto'         # = 'Aberto (A Vencer)' + 'Aberto (Vencido)' — validado por sonda em 10/2026
 
 
 # ----------------------------------------------------------------------------- API
@@ -114,6 +121,21 @@ def listar_parcelas(jwt, tipo, ini, fim, tipo_datas):
         pag += 1
         time.sleep(PAUSA)
     return out
+
+
+def listar_abertos(jwt, ini, fim):
+    """Despesas em aberto por vencimento, todas as páginas. Devolve (parcelas, chamadas).
+    Qualquer falha propaga: lista incompleta NUNCA vai para a conferência."""
+    out, pag = [], 1
+    while True:
+        res = _get(jwt, '/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos',
+                   {'pagina': pag, 'tipo': 'Despesa', 'inicio': ini, 'fim': fim,
+                    'tipoDatas': 'Vencimento', 'status': STATUS_ABERTOS})
+        out += res['Parcelas']
+        if pag >= res['QuantidadeDePaginas']:
+            return out, pag
+        pag += 1
+        time.sleep(PAUSA)
 
 
 def listar_cartoes(jwt, ini, fim, tipo_datas):
@@ -250,6 +272,8 @@ def camada_incremental(cur, dias=7):
         cart = listar_cartoes(jwt, ini2, fim, 'Venda')
         tot, rej = sync(cur, 'f360_sync_cartoes', 'incremental', 'Venda', ini2, fim, cart)
         print(f'   cartoes:  {len(cart)} recebidas | {dict(tot)} | rejeitadas {len(rej)}', flush=True)
+    # depois da carga do dia (editados/baixados já atualizados) e antes do pos_sync; nunca derruba o incremental
+    conferir_abertos(cur)
     pos_sync(cur)
 
 
@@ -354,6 +378,97 @@ def camada_extrato_carga(cur):
         sys.exit(1)
 
 
+# ----------------------------------------------------------------------------- CONFERÊNCIA DE ABERTOS
+def resumo_job(linha):
+    """Acrescenta uma linha ao resumo do job do GitHub Actions (quando existir)."""
+    arq = os.environ.get('GITHUB_STEP_SUMMARY')
+    if arq:
+        try:
+            with open(arq, 'a', encoding='utf-8') as f:
+                f.write(linha + '\n\n')
+        except OSError:
+            pass
+
+
+def brl(v):
+    try:
+        return f'{float(v or 0):,.2f}'.replace(',', '_').replace('.', ',').replace('_', '.')
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def janelas_31(ini, fim):
+    """[ini..fim] em janelas de no máximo 31 dias (limite da API), datas inclusivas."""
+    out, a = [], ini
+    while a <= fim:
+        b = min(a + dt.timedelta(days=30), fim)
+        out.append((a.isoformat(), b.isoformat()))
+        a = b + dt.timedelta(days=1)
+    return out
+
+
+def conferir_abertos(cur):
+    """Lê TODAS as despesas em aberto do F360 (vencimento hoje-30 .. CONF_ABERTOS_FIM), grava pela
+    f360_sync_parcelas e chama f360_conferir_abertos UMA vez com todos os ParcelaId.
+    Se qualquer página falhar, pula a conferência do dia. Nunca levanta exceção (devolve False)."""
+    t0, chamadas = time.time(), 0
+    ini = hoje_brt() - dt.timedelta(days=CONF_ABERTOS_DIAS)
+    fim = dt.date.fromisoformat(CONF_ABERTOS_FIM)
+    janelas = janelas_31(ini, fim)
+    print(f'== CONFERIR ABERTOS {ini}..{fim} · {len(janelas)} janelas · status={STATUS_ABERTOS}', flush=True)
+    try:
+        ids, gravadas = set(), collections.Counter()
+        for wi, wf in janelas:
+            jwt = login()                    # token renovado a cada janela
+            chamadas += 1
+            parc, n = listar_abertos(jwt, wi, wf)
+            chamadas += n
+            fora = collections.Counter(p.get('Status') for p in parc
+                                       if not str(p.get('Status') or '').startswith('Aberto'))
+            if fora:
+                raise RuntimeError(f'filtro status={STATUS_ABERTOS} devolveu outros status em {wi}..{wf}: {dict(fora)}')
+            tot, rej = sync(cur, 'f360_sync_parcelas', 'abertos', 'Vencimento', wi, wf, parc)
+            gravadas.update(tot)
+            ids.update(str(p['ParcelaId']) for p in parc)
+            print(f'   {wi}..{wf}: {len(parc)} abertas | {n} pag | {dict(tot)} | rejeitadas {len(rej)}', flush=True)
+            time.sleep(PAUSA)
+    except Exception as e:
+        msg = (f'⚠️ Conferência de títulos em aberto NÃO rodou hoje: leitura/gravação incompleta '
+               f'({type(e).__name__}: {str(e)[:200]}). Nada foi conferido.')
+        print('   ' + msg, flush=True)
+        resumo_job(msg)
+        return False
+
+    try:
+        cur.execute('select financeiro.f360_conferir_abertos(%s::text[], %s::date, %s::date)',
+                    (sorted(ids), ini.isoformat(), fim.isoformat()))
+        r = cur.fetchone()[0]
+    except Exception as e:
+        msg = f'⚠️ Conferência de títulos em aberto falhou no banco: {type(e).__name__}: {str(e)[:200]}'
+        print('   ' + msg, flush=True)
+        resumo_job(msg)
+        return False
+
+    seg = time.time() - t0
+    sit = r.get('situacao')
+    linha = (f"Conferência de títulos em aberto: F360 {r.get('abertos_f360')} · banco {r.get('abertos_banco')} · "
+             f"ausentes hoje {r.get('ausentes_hoje')} · marcados como excluídos {r.get('marcadas_como_excluidas')} "
+             f"(R$ {brl(r.get('valor_marcado'))}) · reapareceram {r.get('reapareceram')} · situação {sit}")
+    if sit != 'ok':
+        linha = f"⚠️ {linha} — {r.get('obs')}"
+    print('   ' + linha, flush=True)
+    print(f'   ({len(ids)} ParcelaId distintos · {chamadas} chamadas à API · {seg:.0f}s · gravação {dict(gravadas)})',
+          flush=True)
+    resumo_job(linha + f'  \n_{chamadas} chamadas à API · {seg:.0f}s_')
+    return True
+
+
+def camada_conferir_abertos(cur):
+    """Modo avulso: só a conferência, sem a carga incremental. Falha aqui deixa o job vermelho."""
+    if not conferir_abertos(cur):
+        sys.exit(1)
+
+
 def camada_recarga_curta(cur):
     recarga_competencias(cur, 'recarga_curta', ultimas_competencias(3))
 
@@ -375,7 +490,8 @@ if __name__ == '__main__':
          'recarga_curta': camada_recarga_curta,
          'recarga_longa': camada_recarga_longa,
          'extrato_diario': camada_extrato_diario,
-         'extrato_carga': camada_extrato_carga}[camada](cur)
+         'extrato_carga': camada_extrato_carga,
+         'conferir_abertos': camada_conferir_abertos}[camada](cur)
         if camada == 'incremental':
             # extrato roda DEPOIS de títulos/cartões; falha aqui só avisa, não derruba o motor
             try:

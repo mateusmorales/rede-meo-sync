@@ -4,7 +4,8 @@ name: Motor F360
 #   diário   06:00 BRT  -> inputs.camada = incremental
 #   domingo  06:30 BRT  -> inputs.camada = recarga_curta
 #   dia 1º   07:00 BRT  -> inputs.camada = recarga_longa
-# O extrato bancário diário roda dentro do incremental. extrato_carga é só manual.
+# O extrato bancário diário e a conferência dos títulos em aberto rodam dentro do incremental.
+# extrato_carga e conferir_abertos (avulso) são só manuais.
 on:
   workflow_dispatch:
     inputs:
@@ -12,7 +13,7 @@ on:
         description: 'Camada a executar'
         type: choice
         default: incremental
-        options: [incremental, recarga_curta, recarga_longa, extrato_diario, extrato_carga]
+        options: [incremental, recarga_curta, recarga_longa, extrato_diario, extrato_carga, conferir_abertos]
       extrato_ini:
         description: 'extrato_carga: data inicial (AAAA-MM-DD)'
         type: string
