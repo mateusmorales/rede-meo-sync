@@ -1,12 +1,23 @@
 name: Motor 2 - Conferencia diaria
 
+# Sem inputs (cron-job.org) = comportamento diario: ultimos 7 dias.
+# Com data_ini/data_fim = rele o periodo pedido (reprocessamento sob demanda).
 on:
   workflow_dispatch:
+    inputs:
+      data_ini:
+        description: 'vendas: data inicial YYYY-MM-DD (vazio = hoje - 7 dias)'
+        required: false
+        type: string
+      data_fim:
+        description: 'vendas: data final YYYY-MM-DD (vazio = hoje)'
+        required: false
+        type: string
 
 jobs:
   conferencia:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,4 +27,6 @@ jobs:
         env:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+          IN_DATA_INI: ${{ inputs.data_ini }}
+          IN_DATA_FIM: ${{ inputs.data_fim }}
         run: python motor2_conferencia.py

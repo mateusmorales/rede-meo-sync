@@ -1,16 +1,36 @@
 import urllib.request, urllib.error, json, xml.etree.ElementTree as ET, time, os
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timezone, timedelta
 
 SUPA_URL = "https://cqvdhzxwmgdfnpypelcy.supabase.co"
 SUPA_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 CHAVE = os.environ["LINX_CHAVE"]
 LINX = "https://webapi.microvix.com.br/1.0/api/integracao"
 
-HOJE = date.today()
+# Data de Brasilia (o runner do GitHub roda em UTC: as 23h BRT date.today() ja e o dia seguinte).
+# Mesmo padrao do Motor 3.
+BR = timezone(timedelta(hours=-3))
+HOJE = datetime.now(BR).date()
 ONTEM = HOJE - timedelta(days=1)
 SETE_DIAS = HOJE - timedelta(days=7)
 PROD_DI, PROD_DF = ONTEM.isoformat(), HOJE.isoformat()
-VEND_DI, VEND_DF = SETE_DIAS.isoformat(), HOJE.isoformat()
+# Janela de vendas: padrao = ultimos 7 dias. IN_DATA_INI / IN_DATA_FIM (workflow_dispatch)
+# permitem reler um periodo arbitrario sob demanda.
+VEND_DI = (os.environ.get("IN_DATA_INI") or "").strip() or SETE_DIAS.isoformat()
+VEND_DF = (os.environ.get("IN_DATA_FIM") or "").strip() or HOJE.isoformat()
+
+# Falha na largada em vez de varrer a Linx com parametro errado.
+def _valida_data(nome, v):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+        raise SystemExit(f"ERRO: {nome}='{v}' fora do formato YYYY-MM-DD. Nada foi executado.")
+    try:
+        return date.fromisoformat(v)
+    except ValueError:
+        raise SystemExit(f"ERRO: {nome}='{v}' nao e uma data valida. Nada foi executado.")
+if _valida_data("IN_DATA_INI", VEND_DI) > _valida_data("IN_DATA_FIM", VEND_DF):
+    raise SystemExit(f"ERRO: data inicial {VEND_DI}{'' if os.environ.get('IN_DATA_INI','').strip() else ' (padrao: hoje - 7 dias)'} "
+                     f"e posterior a data final {VEND_DF}{'' if os.environ.get('IN_DATA_FIM','').strip() else ' (padrao: hoje)'}. "
+                     f"Nada foi executado.")
 
 CNPJS = {1:"19942423000159",2:"21135935000155",3:"21267421000153",5:"09098956000142",
 7:"16634813000173",8:"05849808000161",9:"30295460000155",10:"35440782000164",
@@ -108,7 +128,7 @@ while True:
 upsert("vendas_produtos", list(produtos.values()), "cod_produto")
 print(f"  OK {len(produtos)} produtos sincronizados.")
 
-print("\n[2b] Reconciliando vendas dos ultimos 7 dias...")
+print(f"\n[2b] Reconciliando vendas de {VEND_DI} a {VEND_DF}...")
 LOJAS=get_lojas()
 gt=0.0; gi=0
 for cod in sorted(CNPJS):
@@ -165,7 +185,7 @@ for cod in sorted(CNPJS):
     sub=round(sum(realizado(x) for x in regs),2)
     gt+=sub; gi+=len(regs)
     print(f"  loja {cod:>2}  {len(regs):>4} itens | R$ {sub:>11,.2f}", flush=True)
-print(f"\n  OK {gi} itens reconciliados | realizado 7 dias R$ {gt:,.2f}")
+print(f"\n  OK {gi} itens reconciliados | realizado {VEND_DI} a {VEND_DF} R$ {gt:,.2f}")
 
 print("\n[cat] Preenchendo categoria dos itens novos...")
 def chama():
@@ -180,13 +200,13 @@ while True:
 print(f"  OK {tot} itens categorizados.")
 
 # [refresh] Encadeia o refresh dos rollups no fim do Motor 2, com o MESMO range de
-# 7 dias que ele reconciliou (VEND_DI..VEND_DF) — assim correcoes de vendas atrasadas
+# periodo que ele reconciliou (VEND_DI..VEND_DF; 7 dias por padrao) — assim correcoes de vendas atrasadas
 # do Linx aparecem no app sem esperar o refresh noturno. Mesmo padrao do Motor 3.
 # As RPCs sao SECURITY DEFINER e tem advisory lock 918273001 por dentro, entao rodar
 # junto do Motor 3 e seguro (sem lock manual aqui). Best-effort: erro so loga e NAO
 # derruba o motor (o dado bruto ja foi reconciliado; o refresh e a cereja, o cron
 # noturno cobre se falhar). Idempotente nas 3 execucoes diarias (3:30, 14h, 20h).
-print("\n[refresh] Atualizando rollup (mesma janela de 7 dias)...")
+print(f"\n[refresh] Atualizando rollup (mesma janela: {VEND_DI} a {VEND_DF})...")
 def dispara_refresh(nome, corpo):
     url=f"{SUPA_URL}/rest/v1/rpc/{nome}"
     headers={"apikey":SUPA_KEY,"Authorization":f"Bearer {SUPA_KEY}","Content-Type":"application/json"}
