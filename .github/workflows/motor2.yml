@@ -1,12 +1,12 @@
 name: Motor 2 - Conferencia diaria
 
-# Sem inputs (cron-job.org) = comportamento diario: ultimos 7 dias.
+# Sem inputs (cron-job.org) = comportamento diario: ultimos 45 dias.
 # Com data_ini/data_fim = rele o periodo pedido (reprocessamento sob demanda).
 on:
   workflow_dispatch:
     inputs:
       data_ini:
-        description: 'vendas: data inicial YYYY-MM-DD (vazio = hoje - 7 dias)'
+        description: 'vendas: data inicial YYYY-MM-DD (vazio = hoje - 45 dias)'
         required: false
         type: string
       data_fim:

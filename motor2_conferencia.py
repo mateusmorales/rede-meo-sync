@@ -12,11 +12,16 @@ LINX = "https://webapi.microvix.com.br/1.0/api/integracao"
 BR = timezone(timedelta(hours=-3))
 HOJE = datetime.now(BR).date()
 ONTEM = HOJE - timedelta(days=1)
-SETE_DIAS = HOJE - timedelta(days=7)
+# Janela padrao de vendas: 45 dias. O ERP permite trocar o vendedor de uma venda ja feita,
+# o que costuma acontecer no fechamento do mes, e essa troca NAO mexe no dt_update do
+# registro: nao ha como detecta-la, a unica defesa e a janela cobrir o intervalo.
+# Pior caso: venda do dia 1o corrigida no fechamento do mes seguinte, ~35 dias; 45 da margem.
+JANELA_DIAS = 45
+JANELA_INI = HOJE - timedelta(days=JANELA_DIAS)
 PROD_DI, PROD_DF = ONTEM.isoformat(), HOJE.isoformat()
-# Janela de vendas: padrao = ultimos 7 dias. IN_DATA_INI / IN_DATA_FIM (workflow_dispatch)
+# Janela de vendas: padrao = ultimos JANELA_DIAS dias. IN_DATA_INI / IN_DATA_FIM (workflow_dispatch)
 # permitem reler um periodo arbitrario sob demanda.
-VEND_DI = (os.environ.get("IN_DATA_INI") or "").strip() or SETE_DIAS.isoformat()
+VEND_DI = (os.environ.get("IN_DATA_INI") or "").strip() or JANELA_INI.isoformat()
 VEND_DF = (os.environ.get("IN_DATA_FIM") or "").strip() or HOJE.isoformat()
 
 # Falha na largada em vez de varrer a Linx com parametro errado.
@@ -28,7 +33,7 @@ def _valida_data(nome, v):
     except ValueError:
         raise SystemExit(f"ERRO: {nome}='{v}' nao e uma data valida. Nada foi executado.")
 if _valida_data("IN_DATA_INI", VEND_DI) > _valida_data("IN_DATA_FIM", VEND_DF):
-    raise SystemExit(f"ERRO: data inicial {VEND_DI}{'' if os.environ.get('IN_DATA_INI','').strip() else ' (padrao: hoje - 7 dias)'} "
+    raise SystemExit(f"ERRO: data inicial {VEND_DI}{'' if os.environ.get('IN_DATA_INI','').strip() else f' (padrao: hoje - {JANELA_DIAS} dias)'} "
                      f"e posterior a data final {VEND_DF}{'' if os.environ.get('IN_DATA_FIM','').strip() else ' (padrao: hoje)'}. "
                      f"Nada foi executado.")
 
@@ -200,7 +205,7 @@ while True:
 print(f"  OK {tot} itens categorizados.")
 
 # [refresh] Encadeia o refresh dos rollups no fim do Motor 2, com o MESMO range de
-# periodo que ele reconciliou (VEND_DI..VEND_DF; 7 dias por padrao) — assim correcoes de vendas atrasadas
+# periodo que ele reconciliou (VEND_DI..VEND_DF; JANELA_DIAS dias por padrao) — assim correcoes de vendas atrasadas
 # do Linx aparecem no app sem esperar o refresh noturno. Mesmo padrao do Motor 3.
 # As RPCs sao SECURITY DEFINER e tem advisory lock 918273001 por dentro, entao rodar
 # junto do Motor 3 e seguro (sem lock manual aqui). Best-effort: erro so loga e NAO
