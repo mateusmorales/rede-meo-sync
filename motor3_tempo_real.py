@@ -1,4 +1,5 @@
 import urllib.request, urllib.error, json, xml.etree.ElementTree as ET, time, os
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 
 SUPA_URL = "https://cqvdhzxwmgdfnpypelcy.supabase.co"
@@ -22,6 +23,14 @@ CNPJS = {1:"19942423000159",2:"21135935000155",3:"21267421000153",5:"09098956000
 def num(s):
     try: return float(s) if s not in (None,"") else None
     except: return None
+def dec(s):
+    # campos fiscais: a API pode mandar virgula decimal ("20,0000") ou ponto ("20.0000").
+    # Devolve o numero EXATO como texto (sem passar por float) ou None.
+    s=(s or "").strip()
+    if not s: return None
+    if "," in s: s=s.replace(".","").replace(",",".")
+    try: return str(Decimal(s))
+    except InvalidOperation: return None
 def inteiro(s):
     try: return int(float(s)) if s not in (None,"") else None
     except: return None
@@ -111,6 +120,10 @@ for cod in sorted(CNPJS):
               "natureza_operacao":g("natureza_operacao") or None,"id_cfop":inteiro(g("id_cfop")),
               "desc_cfop":g("desc_cfop") or None,"timestamp_microvix":inteiro(g("timestamp")),
               "dt_insert":g("dt_insert") or None,"dt_update":g("dt_update") or None,
+              # fiscais (CMV pelas notas de entrada; gravados em toda operacao)
+              "aliquota_ipi":dec(g("aliquota_ipi")),"base_ipi":dec(g("base_ipi")),"valor_ipi":dec(g("valor_ipi")),
+              "desconto_total_item":dec(g("desconto_total_item")),"cst_icms":g("cst_icms") or None,
+              "aliquota_icms":dec(g("aliquota_icms")),"base_icms":dec(g("base_icms")),"valor_icms":dec(g("valor_icms")),
             }
         if novo==0: break
         ts=maxts-1 if maxts>0 else 0

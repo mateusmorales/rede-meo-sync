@@ -1,0 +1,47 @@
+name: Backfill fiscal - notas de entrada
+
+# Disparo APENAS manual. Recarrega aliquota/base/valor de IPI e ICMS, cst_icms e
+# desconto_total_item das linhas operacao='E' de vendas_itens (só UPDATE, por transacao).
+on:
+  workflow_dispatch:
+    inputs:
+      data_ini:
+        description: 'lançamento inicial YYYY-MM-DD (vazio = 2024-01-01)'
+        required: false
+        type: string
+      data_fim:
+        description: 'lançamento final YYYY-MM-DD (vazio = hoje)'
+        required: false
+        type: string
+      lojas:
+        description: 'cod_microvix separados por vírgula (vazio = todas)'
+        required: false
+        type: string
+      dry_run:
+        description: 'dry-run: lê a Linx mas NÃO grava'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: backfill-fiscal-entradas
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar backfill
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LINX_CHAVE: ${{ secrets.LINX_CHAVE }}
+          IN_DATA_INI: ${{ inputs.data_ini }}
+          IN_DATA_FIM: ${{ inputs.data_fim }}
+          IN_LOJAS: ${{ inputs.lojas }}
+          IN_DRY: ${{ inputs.dry_run }}
+        run: python scripts/backfill-fiscal-entradas.py
